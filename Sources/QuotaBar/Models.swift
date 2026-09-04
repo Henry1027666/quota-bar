@@ -35,6 +35,17 @@ enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
         case .deepSeek: .cyan
         }
     }
+
+    /// 各厂商官网额度/订阅页，点击厂商名时跳转。
+    var website: URL? {
+        switch self {
+        case .codex: URL(string: "https://chatgpt.com/usage")
+        case .cursor: URL(string: "https://cursor.com/dashboard/spending")
+        case .claude: URL(string: "https://claude.ai/settings/usage")
+        case .kimi: URL(string: "https://www.kimi.com/settings/subscription?tab=quota&from=kfc_console_upgrade")
+        case .deepSeek: URL(string: "https://platform.deepseek.com/usage")
+        }
+    }
 }
 
 struct QuotaWindow: Identifiable, Equatable, Sendable {

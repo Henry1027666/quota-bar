@@ -66,6 +66,7 @@ struct DashboardView: View {
 private struct ProviderCard: View {
     let kind: ProviderKind
     let state: ProviderState
+    @State private var nameHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -77,7 +78,21 @@ private struct ProviderCard: View {
                     .background(kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(kind.name).font(.system(size: 13, weight: .semibold))
+                    Button {
+                        if let url = kind.website { NSWorkspace.shared.open(url) }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(kind.name).font(.system(size: 13, weight: .semibold))
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .foregroundStyle(nameHovered ? kind.tint : .primary)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { nameHovered = $0 }
+                    .help("打开官网额度页")
                     subtitle
                 }
 
