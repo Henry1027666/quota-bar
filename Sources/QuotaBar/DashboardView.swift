@@ -1,8 +1,35 @@
 import AppKit
 import SwiftUI
 
+/// 透明毛玻璃背景：behindWindow 混合模式让面板真正透出并模糊桌面，
+/// hudWindow 材质比 ultraThinMaterial 更轻更透（菜单栏 HUD 同款质感）。
+private struct VisualEffectBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .hudWindow
+    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
+    var opacity: Double = 1.0
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        apply(to: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        apply(to: nsView)
+    }
+
+    private func apply(to view: NSVisualEffectView) {
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = .active
+        view.isEmphasized = true
+        view.alphaValue = opacity
+    }
+}
+
 struct DashboardView: View {
     @ObservedObject var store: QuotaStore
+    @State private var refreshHovered = false
 
     /// 可见厂商按「token plan → API → free」排序，free 统一排最下方；同档保持稳定顺序。
     private var sortedKinds: [ProviderKind] {
@@ -39,7 +66,7 @@ struct DashboardView: View {
         }
         .padding(14)
         .frame(width: 430, height: 620)
-        .background(.ultraThinMaterial)
+        .background(VisualEffectBackground(opacity: 0.7))
         .task { await store.refresh() }
     }
 
@@ -53,9 +80,13 @@ struct DashboardView: View {
                 Task { await store.refresh(force: true) }
             } label: {
                 Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .medium))
                     .symbolEffect(.rotate, isActive: store.isRefreshing)
+                    .foregroundStyle(refreshHovered ? .primary : .secondary)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.glass)
+            .buttonStyle(.plain)
+            .onHover { refreshHovered = $0 }
             .help("刷新")
             .disabled(store.isRefreshing)
         }

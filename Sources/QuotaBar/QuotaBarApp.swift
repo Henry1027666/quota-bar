@@ -63,7 +63,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
         } else {
             popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover?.contentViewController?.view.window?.makeKey()
+            // 去掉 popover 窗口的不透明底色，让 DashboardView 的毛玻璃材质真正透出桌面。
+            if let window = popover?.contentViewController?.view.window {
+                window.isOpaque = false
+                window.backgroundColor = .clear
+                window.makeKey()
+            }
         }
     }
 
