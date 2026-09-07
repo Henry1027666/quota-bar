@@ -80,14 +80,61 @@ struct KimiProvider: QuotaProvider {
 
         for (url, credential) in credentials {
             guard let token = Support.string(credential["access_token"] ?? credential["accessToken"]) else { continue }
+            // access_token 已过期或即将过期：先用 refresh_token 刷新（Kimi CLI 亦是此机制）。
+            var effectiveToken = token
+            if Self.isExpiring(credential), let refreshed = await Self.refreshCredential(at: url) {
+                effectiveToken = refreshed
+            }
             do {
-                return try await fetchSnapshot(token: token, credentialURL: url)
+                return try await fetchSnapshot(token: effectiveToken, credentialURL: url)
             } catch QuotaError.http(401) {
+                // 401：刷新后再试一次
+                if let refreshed = await Self.refreshCredential(at: url) {
+                    do {
+                        return try await fetchSnapshot(token: refreshed, credentialURL: url)
+                    } catch QuotaError.http(401) {
+                        continue
+                    }
+                }
                 continue
             }
         }
 
-        throw QuotaError.notAuthenticated("Kimi Code 登录已过期")
+        // 存在凭据但全部失效：显示「登录已过期」卡片，而不是从面板中悄悄隐藏。
+        throw QuotaError.sessionExpired("Kimi 登录已过期，请重新登录")
+    }
+
+    /// access_token 是否已过期或在 5 分钟缓冲期内即将过期。
+    private static func isExpiring(_ credential: [String: Any]) -> Bool {
+        guard let exp = Support.number(credential["expires_at"] ?? credential["expiresAt"]) else { return false }
+        return exp - Date().timeIntervalSince1970 < 300
+    }
+
+    /// 用 refresh_token 刷新 access_token 并原子写回凭据文件（保持 600 权限）；成功返回新 token。
+    private static func refreshCredential(at url: URL) async -> String? {
+        guard let data = try? Data(contentsOf: url),
+              var dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let refreshToken = Support.string(dict["refresh_token"]) else { return nil }
+        var request = URLRequest(url: URL(string: "https://auth.kimi.com/api/oauth/token")!)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        let form = "client_id=17e5f671-d194-4dfb-9706-5516cb48c098&grant_type=refresh_token&refresh_token=\(refreshToken.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? refreshToken)"
+        request.httpBody = Data(form.utf8)
+        guard let (data, response) = try? await Support.session.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let newToken = Support.string(result["access_token"]) else { return nil }
+        dict["access_token"] = newToken
+        if let newRefresh = Support.string(result["refresh_token"]) { dict["refresh_token"] = newRefresh }
+        if let expiresIn = Support.number(result["expires_in"]) {
+            dict["expires_at"] = Date().timeIntervalSince1970 + expiresIn
+        }
+        if let payload = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]) {
+            if (try? payload.write(to: url, options: .atomic)) != nil {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }
+        }
+        return newToken
     }
 
     private func fetchSnapshot(token: String, credentialURL: URL) async throws -> ProviderSnapshot {

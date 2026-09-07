@@ -136,10 +136,13 @@ enum QuotaError: LocalizedError {
     case invalidResponse(String)
     case http(Int)
     case command(String)
+    /// 检测到凭据但登录已失效（如 token 过期且刷新失败），应显示提示而非隐藏卡片。
+    case sessionExpired(String)
 
     var errorDescription: String? {
         switch self {
-        case .notAuthenticated(let message), .invalidResponse(let message), .command(let message): message
+        case .notAuthenticated(let message), .invalidResponse(let message),
+             .command(let message), .sessionExpired(let message): message
         case .http(let status): "服务返回 HTTP \(status)"
         }
     }
