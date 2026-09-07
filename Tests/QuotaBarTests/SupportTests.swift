@@ -37,6 +37,23 @@ import Testing
     #expect(windows.count == 2)
 }
 
+@Test func kimiParsesFiveHourWindowWhenQuotaExhausted() {
+    // 额度用满时接口只返回 remaining 不返回 used：5 小时窗口仍应显示，used 由 limit-remaining 推算。
+    let body: [String: Any] = [
+        "usage": ["limit": 100, "used": 100, "resetTime": "2026-09-08T05:51:13Z"],
+        "limits": [
+            [
+                "window": ["duration": 300, "timeUnit": "TIME_UNIT_MINUTE"],
+                "detail": ["limit": 100, "remaining": 100, "resetTime": "2026-09-07T05:51:13Z"]
+            ]
+        ]
+    ]
+    let windows = KimiProvider.parseKimiWindows(body)
+    #expect(windows.contains { $0.title == "周限额" && $0.used == 100 && $0.limit == 100 })
+    #expect(windows.contains { $0.title == "5 小时" && $0.used == 0 && $0.limit == 100 })
+    #expect(windows.count == 2)
+}
+
 @Test func kimiParsesBoosterWalletBalance() {
     // 实测 boosterWallet.balance 结构：amount/amountLeft 以 1e-8 元为单位（UNIT_CURRENCY）。
     let body: [String: Any] = [

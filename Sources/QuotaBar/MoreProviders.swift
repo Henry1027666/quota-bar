@@ -191,6 +191,7 @@ struct KimiProvider: QuotaProvider {
     /// Kimi 接口返回结构（实测）：
     /// - 顶层 `usage`：每周重置的套餐额度（周限额），如 `{ "limit": 100, "used": 98, "resetTime": "下周一" }`
     /// - `limits` 数组：各时间窗口，如 `[{ "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"}, "detail": {"limit": 100, "used": 11, "resetTime": ...} }]`（300 分钟 → 5 小时）
+    /// 注意：额度用满时接口可能不再返回 `detail.used`，只返回 `remaining`，需用 limit - remaining 推算。
     /// 窗口标题从 window 的时长推断；顶层 usage 单独解析为「周限额」，与 limits 共存显示。
     static func parseKimiWindows(_ body: [String: Any]) -> [QuotaWindow] {
         var windows: [QuotaWindow] = []
@@ -200,7 +201,7 @@ struct KimiProvider: QuotaProvider {
             for row in rows {
                 let window = row["window"] as? [String: Any]
                 let detail = row["detail"] as? [String: Any]
-                guard let detail, let used = Support.firstNumber(in: detail, keys: ["used", "usage"]),
+                guard let detail, let used = usedAmount(in: detail),
                       let limit = Support.firstNumber(in: detail, keys: ["limit", "total"]), limit > 0 else { continue }
                 let duration = Support.firstNumber(in: window ?? [:], keys: ["duration"]) ?? 0
                 let timeUnit = Support.firstString(in: window ?? [:], keys: ["timeUnit", "time_unit"])?.lowercased() ?? ""
@@ -213,7 +214,7 @@ struct KimiProvider: QuotaProvider {
         // 2) 顶层 usage：每周重置的套餐额度（周限额）。若 limits 中已含周限额则不重复添加。
         if !windows.contains(where: { $0.title == "周限额" }),
            let usage = body["usage"] as? [String: Any],
-           let used = Support.firstNumber(in: usage, keys: ["used", "usage"]),
+           let used = usedAmount(in: usage),
            let limit = Support.firstNumber(in: usage, keys: ["limit", "total"]), limit > 0 {
             let reset = Support.date(Support.firstValue(in: usage, keys: ["resetTime", "reset_time", "resets_at"]))
             windows.append(QuotaWindow(title: "周限额", used: used, limit: limit, resetAt: reset))
@@ -228,6 +229,16 @@ struct KimiProvider: QuotaProvider {
 
         var seen = Set<String>()
         return windows.filter { seen.insert("\($0.title)-\($0.resetAt?.timeIntervalSince1970 ?? 0)").inserted }
+    }
+
+    /// 从额度明细提取已用量：优先 used/usage；额度用满时接口可能只返回 remaining，此时用 limit - remaining 推算。
+    private static func usedAmount(in detail: [String: Any]) -> Double? {
+        if let used = Support.firstNumber(in: detail, keys: ["used", "usage"]) { return used }
+        if let limit = Support.firstNumber(in: detail, keys: ["limit", "total"]),
+           let remaining = Support.firstNumber(in: detail, keys: ["remaining", "left"]) {
+            return limit - remaining
+        }
+        return nil
     }
 
     private static func windowTitle(duration: Double, timeUnit: String) -> String {
