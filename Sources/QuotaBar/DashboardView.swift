@@ -30,6 +30,11 @@ private struct VisualEffectBackground: NSViewRepresentable {
 struct DashboardView: View {
     @ObservedObject var store: QuotaStore
     @State private var refreshHovered = false
+    /// 内容高度变化回调：AppDelegate 据此更新 popover 尺寸，实现窗口随条目自适应。
+    var onContentHeightChange: ((CGFloat) -> Void)?
+
+    /// 内容区（ScrollView）最大高度：条目再多也不超过此高度，超出滚动。
+    private static let maxContentHeight: CGFloat = 560
 
     /// 可见厂商按「token plan → API → free」排序，free 统一排最下方；同档保持稳定顺序。
     private var sortedKinds: [ProviderKind] {
@@ -60,13 +65,24 @@ struct DashboardView: View {
                 .padding(.vertical, 4)
             }
             .scrollIndicators(.hidden)
+            .frame(maxHeight: Self.maxContentHeight)
 
             Divider().opacity(0.35)
             footer
         }
         .padding(14)
-        .frame(width: 430, height: 620)
+        .frame(width: 430)
         .background(VisualEffectBackground(opacity: 0.7))
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { onContentHeightChange?(geo.size.height) }
+                    .onChange(of: geo.size.height) { _, newHeight in
+                        onContentHeightChange?(newHeight)
+                    }
+            }
+        )
+        .fixedSize(horizontal: false, vertical: true)
         .task { await store.refresh() }
     }
 

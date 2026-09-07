@@ -30,12 +30,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusItem = item
 
-        // 额度面板：NSPopover 承载 DashboardView
+        // 额度面板：NSPopover 承载 DashboardView，窗口高度随内容条目自适应。
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
         popover.contentSize = NSSize(width: 430, height: 620)
-        popover.contentViewController = NSHostingController(rootView: DashboardView(store: store))
+        let hosting = NSHostingController(
+            rootView: DashboardView(store: store) { [weak self] height in
+                self?.updatePopoverContentSize(height: height)
+            }
+        )
+        popover.contentViewController = hosting
         self.popover = popover
 
         // 用户通过右键菜单“退出”时，先标记为显式退出，再发起 terminate。
@@ -55,6 +60,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showQuitMenu(from: button)
         } else {
             togglePopover(from: button)
+        }
+    }
+
+    /// 根据 DashboardView 实测内容高度调整 popover 尺寸（下限 120，上限 620）。
+    private func updatePopoverContentSize(height: CGFloat) {
+        guard let popover else { return }
+        let clamped = min(max(height, 120), 620)
+        let newSize = NSSize(width: 430, height: clamped)
+        if abs(newSize.height - popover.contentSize.height) > 1 {
+            popover.contentSize = newSize
         }
     }
 
