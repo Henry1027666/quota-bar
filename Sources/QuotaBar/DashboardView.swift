@@ -84,6 +84,9 @@ struct DashboardView: View {
         )
         .fixedSize(horizontal: false, vertical: true)
         .task { await store.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: .dsWebUsageUpdated)) { _ in
+            Task { await store.refresh(force: true) }
+        }
     }
 
     private var footer: some View {
@@ -170,15 +173,38 @@ private struct ProviderCard: View {
                     }
                 }
                 if snapshot.tokenUsage != nil || snapshot.requestCount != nil {
-                    HStack(spacing: 16) {
+                    VStack(spacing: 4) {
                         if let tokens = snapshot.tokenUsage {
-                            metric("Tokens", value: tokens.formatted(.number.notation(.compactName)))
+                            HStack {
+                                Text("Tokens").foregroundStyle(.secondary)
+                                Spacer()
+                                Text(tokens.formatted(.number.notation(.compactName)))
+                                    .monospacedDigit()
+                                    .fontWeight(.medium)
+                            }
                         }
                         if let requests = snapshot.requestCount {
-                            metric("请求", value: requests.formatted())
+                            HStack {
+                                Text("请求").foregroundStyle(.secondary)
+                                Spacer()
+                                Text(requests.formatted())
+                                    .monospacedDigit()
+                                    .fontWeight(.medium)
+                            }
                         }
-                        Spacer()
                     }
+                    .font(.caption)
+                }
+                if kind == .deepSeek, snapshot.tokenUsage == nil, snapshot.requestCount == nil {
+                    Button {
+                        DeepSeekWebSession.shared.showLoginWindow()
+                    } label: {
+                        Label("登录 DeepSeek 获取今日用量", systemImage: "person.crop.circle.badge.plus")
+                            .font(.caption)
+                            .foregroundStyle(kind.tint)
+                    }
+                    .buttonStyle(.plain)
+                    .help("在应用内登录 DeepSeek 开放平台，自动统计今日调用次数与消耗")
                 }
                 if let message = snapshot.message {
                     Text(message).font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
@@ -223,14 +249,6 @@ private struct ProviderCard: View {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
             }
         }
-    }
-
-    private func metric(_ label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(value).fontWeight(.semibold).monospacedDigit()
-            Text(label).foregroundStyle(.secondary)
-        }
-        .font(.caption)
     }
 
     private func balanceText(_ balance: MoneyBalance) -> String {

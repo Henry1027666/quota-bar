@@ -37,6 +37,55 @@ import Testing
     #expect(windows.count == 2)
 }
 
+@Test func deepSeekParsesByApiKeyUsage() {
+    // DeepSeek 用量页改版后的 by_api_key 接口结构（实测）：
+    // summary → 充值余额/累计消费；amount → series[].buckets[].usage 逐日求和；
+    // cost → data[].series[].buckets[].cost 逐日求和。
+    let summary: [String: Any] = [
+        "code": 0, "data": ["biz_code": 0, "biz_data": [
+            "bonus_wallets": [["balance": "0", "currency": "USD"]],
+            "normal_wallets": [["balance": "0E-16", "currency": "USD"],
+                               ["balance": "20.5045226600000000", "currency": "CNY"]],
+            "total_costs": [["amount": "0", "currency": "USD"],
+                            ["amount": "519.4954773400000000", "currency": "CNY"]]
+        ]]
+    ]
+    let amount: [String: Any] = [
+        "code": 0, "data": ["biz_code": 0, "biz_data": [
+            "bucket": 86400,
+            "series": [[
+                "api_key": ["name": "qingyao-copilot"],
+                "buckets": [
+                    ["time": 1786204800, "usage": ["PROMPT_CACHE_HIT_TOKEN": 100, "PROMPT_CACHE_MISS_TOKEN": 200, "REQUEST": 5, "RESPONSE_TOKEN": 300]],
+                    ["time": 1786291200, "usage": ["PROMPT_CACHE_HIT_TOKEN": 0, "PROMPT_CACHE_MISS_TOKEN": 50, "REQUEST": 2, "RESPONSE_TOKEN": 100]]
+                ]
+            ]]
+        ]]
+    ]
+    let cost: [String: Any] = [
+        "code": 0, "data": ["biz_code": 0, "biz_data": [
+            "data": [["currency": "CNY", "series": [[
+                "api_key": ["name": "qingyao-copilot"],
+                "buckets": [["cost": "1.5", "time": 1786204800], ["cost": "2.25", "time": 1786291200]]
+            ]]]]
+        ]]
+    ]
+    let payload: [String: Any] = [
+        "/api/v0/users/get_user_summary": summary,
+        "/api/v0/usage/by_api_key/amount": amount,
+        "/api/v0/usage/by_api_key/cost": cost,
+    ]
+    let web = DeepSeekProvider.parseWebPayload(payload)
+    #expect(web != nil)
+    #expect(web?.requestCount == 7)
+    #expect(web?.tokenUsage == 750)
+    #expect(web?.balances.contains { $0.label == "累计消费" && abs($0.amount - 519.49) < 0.01 } == true)
+    #expect(web?.balances.contains { $0.label == "近30天消费" && abs($0.amount - 3.75) < 0.01 } == true)
+    // 充值余额与官方 API 余额重复，不重复展示；零值赠送余额也不显示
+    #expect(web?.balances.contains { $0.label == "充值余额" } == false)
+    #expect(web?.balances.contains { $0.label == "赠送余额" } == false)
+}
+
 @Test func kimiParsesFiveHourWindowWhenQuotaExhausted() {
     // 额度用满时接口只返回 remaining 不返回 used：5 小时窗口仍应显示，used 由 limit-remaining 推算。
     let body: [String: Any] = [

@@ -264,24 +264,232 @@ struct DeepSeekProvider: QuotaProvider {
         guard let apiKey = discoverAPIKey() else {
             throw QuotaError.notAuthenticated("未检测到 DeepSeek API Key")
         }
+        // 官方 API：余额（始终可用）
         let payload = try await Support.jsonRequest(
             URL(string: "https://api.deepseek.com/user/balance")!, bearer: apiKey
         )
         let root = payload as? [String: Any] ?? [:]
         let rows = root["balance_infos"] as? [[String: Any]] ?? []
-        let balances = rows.compactMap { row -> MoneyBalance? in
+        var balances = rows.compactMap { row -> MoneyBalance? in
             guard let amount = Support.firstNumber(in: row, keys: ["total_balance", "balance"]) else { return nil }
             return MoneyBalance(
                 label: "API 余额",
                 amount: amount,
                 currency: Support.firstString(in: row, keys: ["currency"]) ?? "CNY"
             )
+        }.filter { $0.amount > 0 }
+
+        // 网页用量统计（今日调用次数 / 消耗 / 本月消费）：
+        // 优先使用手动 token 文件（快速 HTTP 路径），否则走内嵌登录会话（自动路径）。
+        var tokenUsage: Int?
+        var requestCount: Int?
+        var message: String?
+        if let webToken = discoverWebToken() {
+            do {
+                let web = try await fetchWebUsage(token: webToken)
+                applyWeb(web, to: &balances, &tokenUsage, &requestCount)
+                if web.isEmpty { message = "网页用量接口未返回数据" }
+            } catch let QuotaError.sessionExpired(msg) {
+                message = msg
+            } catch {
+                message = "用量统计不可用（\(error.localizedDescription)）"
+            }
+        } else {
+            switch await DeepSeekWebSession.shared.fetchUsage() {
+            case .data(let web):
+                applyWeb(web, to: &balances, &tokenUsage, &requestCount)
+                if web.isEmpty { message = "网页用量接口未返回数据" }
+            case .notLoggedIn:
+                message = "未开启今日用量：点下方「登录 DeepSeek」"
+            case .timeout:
+                message = "用量统计获取超时，可点下方按钮重试"
+            }
         }
+
         return ProviderSnapshot(
             kind: kind, plan: "API", account: nil, windows: [], balances: balances,
-            tokenUsage: nil, requestCount: nil, updatedAt: Date(),
-            message: Support.bool(root["is_available"]) == false ? "余额暂不可用" : (balances.isEmpty ? "服务未返回余额" : nil)
+            tokenUsage: tokenUsage, requestCount: requestCount, updatedAt: Date(),
+            message: Support.bool(root["is_available"]) == false ? "余额暂不可用"
+                : (message ?? (balances.isEmpty ? "服务未返回余额" : nil))
         )
+    }
+
+    private func applyWeb(_ web: WebUsage, to balances: inout [MoneyBalance],
+                          _ tokenUsage: inout Int?, _ requestCount: inout Int?) {
+        balances.append(contentsOf: web.balances)
+        tokenUsage = web.tokenUsage
+        requestCount = web.requestCount
+    }
+
+    // MARK: - 网页端用量（platform.deepseek.com，需登录态）
+
+    private static let endpointSummary = "/api/v0/users/get_user_summary"
+    private static let endpointAmount = "/api/v0/usage/by_api_key/amount"
+    private static let endpointCost = "/api/v0/usage/by_api_key/cost"
+
+    struct WebUsage: Sendable {
+        var balances: [MoneyBalance] = []
+        var tokenUsage: Int?
+        var requestCount: Int?
+        var isEmpty: Bool { balances.isEmpty && tokenUsage == nil && requestCount == nil }
+    }
+
+    /// 解析内嵌会话收集的三个接口响应体（键为 endpoint path）。
+    static func parseWebPayload(_ payload: [String: Any]) -> WebUsage? {
+        var result = WebUsage()
+        if let summary = payload[endpointSummary] {
+            parseSummary(summary, into: &result)
+        }
+        if let amount = payload[endpointAmount] {
+            parseAmount(amount, into: &result)
+        }
+        if let cost = payload[endpointCost] {
+            parseCost(cost, into: &result)
+        }
+        return result.isEmpty ? nil : result
+    }
+
+    /// 调用 DeepSeek 开放平台网页端三个 /api/v0 接口，汇总「近 30 天请求/Token/消费、累计消费、余额」。
+    /// 数据口径与平台「用量信息」页一致（by_api_key 接口，按东八区每天一个 bucket，共 30 天）。
+    private func fetchWebUsage(token: String) async throws -> WebUsage {
+        let base = "https://platform.deepseek.com/api/v0"
+        let range = Self.usageRange()
+        let tz = 8 * 3600
+
+        var result = WebUsage()
+
+        // 1) 账户摘要：充值余额 / 赠送余额 / 累计消费
+        let summary = try await Support.jsonRequest(URL(string: "\(base)/users/get_user_summary")!, bearer: token)
+        try ensureWebSuccess(summary)
+        Self.parseSummary(summary, into: &result)
+
+        // 2) Token/请求用量（近 30 天）
+        let amount = try await Support.jsonRequest(
+            URL(string: "\(base)/usage/by_api_key/amount?start=\(Int(range.start))&end=\(Int(range.end))&tz=\(tz)")!,
+            bearer: token)
+        try ensureWebSuccess(amount)
+        Self.parseAmount(amount, into: &result)
+
+        // 3) 每日费用（近 30 天）
+        let cost = try await Support.jsonRequest(
+            URL(string: "\(base)/usage/by_api_key/cost?start=\(Int(range.start))&end=\(Int(range.end))&tz=\(tz)")!,
+            bearer: token)
+        try ensureWebSuccess(cost)
+        Self.parseCost(cost, into: &result)
+
+        return result
+    }
+
+    // MARK: - 解析（HTTP 与内嵌会话共用）
+
+    /// get_user_summary：赠送余额（非零）/ 累计消费（total_costs CNY）。
+    /// 充值余额与官方 API 余额重复，不重复展示。
+    private static func parseSummary(_ json: Any, into result: inout WebUsage) {
+        guard let biz = bizData(json) else { return }
+        if let (bonus, currency) = firstNonZeroWallet(biz["bonus_wallets"]) {
+            result.balances.append(MoneyBalance(label: "赠送余额", amount: bonus, currency: currency))
+        }
+        // 累计消费：CNY 总额（0 也显示，属核心指标）
+        if let total = walletAmount(biz["total_costs"], currency: "CNY", key: "amount", includeZero: true) {
+            result.balances.append(MoneyBalance(label: "累计消费", amount: total, currency: "CNY"))
+        }
+    }
+
+    /// by_api_key/amount：series[].buckets[].usage 逐日求和（近 30 天请求数 / Tokens）。
+    private static func parseAmount(_ json: Any, into result: inout WebUsage) {
+        guard let biz = bizData(json),
+              let series = biz["series"] as? [[String: Any]] else { return }
+        var requests = 0
+        var tokens = 0
+        for item in series {
+            for bucket in (item["buckets"] as? [[String: Any]] ?? []) {
+                guard let usage = bucket["usage"] as? [String: Any] else { continue }
+                requests += Int(Support.firstNumber(in: usage, keys: ["REQUEST"]) ?? 0)
+                tokens += Int(Support.firstNumber(in: usage, keys: ["PROMPT_CACHE_HIT_TOKEN"]) ?? 0)
+                    + Int(Support.firstNumber(in: usage, keys: ["PROMPT_CACHE_MISS_TOKEN"]) ?? 0)
+                    + Int(Support.firstNumber(in: usage, keys: ["RESPONSE_TOKEN", "COMPLETION_TOKEN"]) ?? 0)
+            }
+        }
+        result.requestCount = requests
+        result.tokenUsage = tokens
+    }
+
+    /// by_api_key/cost：data[].series[].buckets[].cost 逐日求和（近 30 天消费）。
+    private static func parseCost(_ json: Any, into result: inout WebUsage) {
+        guard let biz = bizData(json),
+              let data = biz["data"] as? [[String: Any]] else { return }
+        var total = 0.0
+        var currency = "CNY"
+        for entry in data {
+            if let c = Support.firstString(in: entry, keys: ["currency"]), !c.isEmpty { currency = c }
+            for item in (entry["series"] as? [[String: Any]] ?? []) {
+                for bucket in (item["buckets"] as? [[String: Any]] ?? []) {
+                    total += Support.firstNumber(in: bucket, keys: ["cost", "amount"]) ?? 0
+                }
+            }
+        }
+        // 近30天消费：核心指标，0 也显示
+        result.balances.append(MoneyBalance(label: "近30天消费", amount: (total * 100).rounded() / 100, currency: currency))
+    }
+
+    /// 页面默认口径：东八区「今天 00:00」到「明天 00:00」为 end，向前 30 天为 start。
+    private static func usageRange() -> (start: TimeInterval, end: TimeInterval) {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let todayStart = cal.startOfDay(for: Date())
+        let end = todayStart.addingTimeInterval(86400)
+        let start = end.addingTimeInterval(-30 * 86400)
+        return (start.timeIntervalSince1970, end.timeIntervalSince1970)
+    }
+
+    /// 在 wallets/costs 数组中取指定币种的值；includeZero 为 true 时金额 0 也返回。
+    private static func walletAmount(_ value: Any?, currency: String, key: String, includeZero: Bool = false) -> Double? {
+        guard let rows = value as? [[String: Any]] else { return nil }
+        for row in rows {
+            guard (Support.firstString(in: row, keys: ["currency"]) ?? "").uppercased() == currency else { continue }
+            if let amount = Support.firstNumber(in: row, keys: [key]), includeZero || amount > 0 {
+                return amount
+            }
+        }
+        return nil
+    }
+
+    /// 取第一个非零余额的钱包（币种 + 金额）。
+    private static func firstNonZeroWallet(_ value: Any?) -> (Double, String)? {
+        guard let rows = value as? [[String: Any]] else { return nil }
+        for row in rows {
+            if let amount = Support.firstNumber(in: row, keys: ["balance"]), amount > 0 {
+                return (amount, Support.firstString(in: row, keys: ["currency"]) ?? "CNY")
+            }
+        }
+        return nil
+    }
+    private static func bizData(_ json: Any) -> [String: Any]? {
+        let dict = json as? [String: Any] ?? [:]
+        if let biz = dict["biz_data"] as? [String: Any] { return biz }
+        if let d = dict["data"] as? [String: Any], let biz = d["biz_data"] as? [String: Any] { return biz }
+        if let d = dict["data"] as? [[String: Any]], let first = d.first { return first }
+        return dict.isEmpty ? nil : dict
+    }
+
+    /// 网页接口 code != 0 时抛错：40002/40003 视为登录态失效。
+    private func ensureWebSuccess(_ json: Any) throws {
+        let dict = json as? [String: Any] ?? [:]
+        if let code = Support.firstNumber(in: dict, keys: ["code"]), Int(code) != 0 {
+            if Int(code) == 40002 || Int(code) == 40003 {
+                throw QuotaError.sessionExpired("DeepSeek 网页登录已过期，请更新 ~/.deepseek/web_token 或在面板内重新登录")
+            }
+            throw QuotaError.invalidResponse("DeepSeek 网页接口错误（code \(Int(code))）")
+        }
+    }
+
+    private func discoverWebToken() -> String? {
+        if let value = ProcessInfo.processInfo.environment["DEEPSEEK_WEB_TOKEN"].flatMap(Support.string) { return value }
+        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".deepseek/web_token")
+        guard FileManager.default.fileExists(atPath: url.path),
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func discoverAPIKey() -> String? {
