@@ -116,14 +116,25 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
 
     // MARK: - 登录成功处理
 
-    /// 页面请求到了核心用量接口 → 判定登录成功：收割 cookie、自动关窗、通知刷新。
-    private func handleLoginSuccess() {
+    /// 页面发起了用量接口，且响应体确为「已登录」才判定登录成功。
+    /// 仅发起请求不代表登录——未登录访问 /usage 也会向后端发这些接口（返回 code!=0）。
+    /// 因此必须校验顶层 `code == 0` 且含有真实数据，再收割 cookie、自动关窗、通知刷新。
+    private func handleUsageData(_ endpoint: String, data: Any) {
         guard isLoginWindowLoading, loginWindow != nil, !didLogin else { return }
+        // 确认真实登录：顶层 code == 0（DeepSeek 未登录/过期会返回 code != 0）。
+        guard let dict = data as? [String: Any],
+              let code = (dict["code"] as? NSNumber)?.intValue
+                  ?? (dict["code"] as? Int),
+              code == 0 else {
+            log("登录判定: \(endpoint) 返回 code!=0，尚未登录，继续等待")
+            return
+        }
         isLoginWindowLoading = false
         didLogin = true
-        // 优先从登录窗口 webView 的 dataStore 收割（此刻 cookie 最新、必已写入）。
+        // 登录成功 → 收割 cookie（此刻认证会话已建立）。稍候片刻确保 httpCookieStore 已写入。
         if let store = loginWebView?.configuration.websiteDataStore {
             Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 800_000_000)
                 let harvested = await self?.harvestCookies(from: store)
                 self?.log("登录成功，收割结果: \(harvested != nil ? "成功" : "失败(无cookie)")")
                 self?.teardownLoginWindow()
@@ -160,17 +171,24 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
               let id = body["id"] as? String else { return }
         // 诊断上报不参与登录判定
         if id == "__req__" { return }
-        // 登录页发起了核心用量接口 → 说明已具备会话，视为登录成功。
+        // 用量接口响应体（未登录也会发请求，但 code!=0；登录成功才 code==0）
+        let payload = body["data"]
+        if let dict = payload as? [String: Any],
+           let code = (dict["code"] as? NSNumber)?.intValue ?? (dict["code"] as? Int) {
+            log("接口 \(id) 返回 code=\(code)")
+        }
+        // 登录页发起了核心用量接口 → 依据响应体 code 判定是否真已登录。
         if id == Endpoint.amount || id == Endpoint.cost || id == Endpoint.summary {
-            handleLoginSuccess()
+            handleUsageData(id, data: payload ?? [:])
         }
     }
 
     // MARK: - WKNavigationDelegate（未登录跳转检测 / 完成兜底）
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // 若导航落在 usage 且已有 cookie，尝试判定；纯兜底，避免脚本偶发漏触发。
-        handleLoginSuccess()
+        log("登录窗口导航完成: \(webView.url?.absoluteString ?? "?")")
+        // 注意：此处不触发登录判定——页面加载完成 ≠ 已登录。
+        // 登录与否只由 userContentController 收到的接口响应体 code==0 判定（见 handleUsageData）。
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -213,12 +231,13 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         NSLog("[DSWeb] %@", message)
     }
 
-    /// 页面注入脚本：拦截 DeepSeek 用量接口的 fetch/XHR，仅用于判定登录完成。
+    /// 页面注入脚本：拦截 DeepSeek 用量接口的 fetch/XHR，把**完整响应体**回传，
+    /// 用于确认真实登录态（仅请求到接口不代表已登录——未登录访问也会发请求）。
     private static let interceptScript = #"""
     (function () {
       var endpoints = ['/api/v0/users/get_user_summary', '/api/v0/usage/by_api_key/amount', '/api/v0/usage/by_api_key/cost'];
-      function post(id) {
-        try { window.webkit.messageHandlers.dsUsage.postMessage({ id: id, data: {} }); } catch (e) {}
+      function post(id, data) {
+        try { window.webkit.messageHandlers.dsUsage.postMessage({ id: id, data: data }); } catch (e) {}
       }
       function match(url) {
         for (var i = 0; i < endpoints.length; i++) {
@@ -230,9 +249,13 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
       window.fetch = function (input, init) {
         var url = typeof input === 'string' ? input : (input && input.url) || '';
         var ep = match(url);
-        var p = origFetch.apply(this, arguments);
-        if (ep) { p.then(function () { post(ep); }).catch(function () {}); }
-        return p;
+        if (!ep) { return origFetch.apply(this, arguments); }
+        return origFetch.apply(this, arguments).then(function (resp) {
+          if (resp && resp.ok) {
+            resp.clone().json().then(function (j) { post(ep, j); }).catch(function () {});
+          }
+          return resp;
+        });
       };
       var OrigXHR = window.XMLHttpRequest;
       window.XMLHttpRequest = function () {
@@ -241,7 +264,10 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         var origOpen = xhr.open;
         xhr.open = function (method, url) { u = url; return origOpen.apply(xhr, arguments); };
         xhr.addEventListener('load', function () {
-          if (match(u) && xhr.status >= 200 && xhr.status < 300) { post(match(u)); }
+          var ep = match(u);
+          if (ep && xhr.status >= 200 && xhr.status < 300) {
+            try { post(ep, JSON.parse(xhr.responseText)); } catch (e) {}
+          }
         });
         return xhr;
       };
