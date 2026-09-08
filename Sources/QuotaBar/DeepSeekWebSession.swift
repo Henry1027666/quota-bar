@@ -18,15 +18,10 @@ import WebKit
 final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     static let shared = DeepSeekWebSession()
 
-    /// 收割的网页会话 Cookie 头落盘路径（DeepSeekProvider 读取复用做纯 HTTP 拉取）。
-    nonisolated static let cookieFileURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".deepseek/web_cookies")
-
-    /// DeepSeek 会话的持久化 WebKit 数据存储标识（固定 UUID，保证重启后登录态仍在）。
+    /// DeepSeek 会话的持久化 WebKit 数据存储标识（固定 UUID，保证登录窗口会话跨次保持）。
     private static let dataStoreID = UUID(uuidString: "1B4E7A92-6C3D-4F8A-B5E0-2D9C47F61A83")!
 
     private static let usageURL = URL(string: "https://platform.deepseek.com/usage")!
-    private static let cookieDomains = ["platform.deepseek.com", ".deepseek.com", "deepseek.com"]
 
     /// 登录窗口持有的 webView（一次性，关闭即释放）。
     private var loginWebView: WKWebView?
@@ -75,43 +70,54 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         wv.load(URLRequest(url: Self.usageURL))
     }
 
-    // MARK: - Cookie 收割（后台纯 HTTP 的凭据来源）
+    // MARK: - Token 收割（后台纯 HTTP 的凭据来源）
 
-    /// 从给定 dataStore 收割 DeepSeek 会话 cookie，编码为 `Cookie:` 头写盘；成功返回头部，否则 nil。
-    private func harvestCookies(from store: WKWebsiteDataStore) async -> String? {
-        let cookies = await store.httpCookieStore.allCookies()
-        guard !cookies.isEmpty else { log("harvest: 无 cookie"); return nil }
-        let relevant = cookies.filter { cookie in
-            cookie.domain.lowercased().contains("deepseek.com")
-        }
-        guard !relevant.isEmpty else { log("harvest: 无 deepseek cookie"); return nil }
-        // 只保留登录会话相关（排除无值的）；按标准 Cookie 头拼装。
-        let parts = relevant.compactMap { c -> String? in
-            let v = c.value.trimmingCharacters(in: .whitespaces)
-            return v.isEmpty ? nil : "\(c.name)=\(v)"
-        }
-        guard !parts.isEmpty else { return nil }
-        let header = parts.joined(separator: "; ")
-        // 原子写盘，0600 权限（含会话凭据，不落宽权限）。
-        do {
-            let dir = Self.cookieFileURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try header.write(to: Self.cookieFileURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.cookieFileURL.path)
-            log("harvest: 已收割 \(relevant.count) 个 deepseek cookie → \(Self.cookieFileURL.lastPathComponent)")
-            return header
-        } catch {
-            log("harvest: 写盘失败 \(error.localizedDescription)")
-            return nil
-        }
+    // DeepSeek 网页端登录态认证**不依赖 cookie**（cookie 里只有 HWWAFSESID/smidV2 等 WAF/追踪项），
+    // 真正的登录凭据是存在 localStorage 的 `userToken`（JWT），请求时以 `Authorization: Bearer` 发送。
+    // 因此收割目标是 localStorage 里的 JWT，而非 httpCookieStore。
+
+    /// 收割的 JWT 落盘路径（= 现有 bearer token 路径，DeepSeekProvider.discoverWebToken 读取）。
+    private static var tokenFileURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".deepseek/web_token")
     }
 
-    /// 从持久化 WebKit 数据存储直接重新收割（不创建任何 WebView）。
-    /// DeepSeekProvider 在 cookie 头缺失/过期时调用；app 内直接读持久化 dataStore 的 cookieStore 即可。
-    func harvestStoredCookies() async -> String? {
-        // 注意：持久化 dataStore 需在进程内被使用过才落库；直接用 identifier 取 store 并读 httpCookieStore。
-        let store = WKWebsiteDataStore(forIdentifier: Self.dataStoreID)
-        return await harvestCookies(from: store)
+    /// 从登录窗口 webView 的 localStorage 收割 DeepSeek JWT（userToken），原子写盘 `~/.deepseek/web_token`。
+    /// 页面此刻加载于 platform.deepseek.com，同源可读 localStorage。JWT 以 `eyJ` 开头。
+    private func harvestToken(from webView: WKWebView) async -> String? {
+        // 遍历 localStorage，取第一个 JWT 格式的值（宽松匹配，兼容 key 名变化）。
+        let js = #"""
+        (function () {
+          try {
+            var out = null;
+            for (var i = 0; i < localStorage.length; i++) {
+              var k = localStorage.key(i);
+              var v = localStorage.getItem(k);
+              if (v && v.indexOf('eyJ') === 0) { out = v; break; }
+            }
+            return out;
+          } catch (e) { return null; }
+        })()
+        """#
+        let token: String? = await withCheckedContinuation { cont in
+            webView.evaluateJavaScript(js) { result, _ in
+                cont.resume(returning: result as? String)
+            }
+        }
+        guard let t = token?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else {
+            log("token收割: localStorage 未找到 JWT")
+            return nil
+        }
+        do {
+            let dir = Self.tokenFileURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try t.write(to: Self.tokenFileURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.tokenFileURL.path)
+            log("token收割: 已写盘 \(Self.tokenFileURL.lastPathComponent) (JWT \(t.prefix(20))…)")
+            return t
+        } catch {
+            log("token收割: 写盘失败 \(error.localizedDescription)")
+            return nil
+        }
     }
 
     // MARK: - 登录成功处理
@@ -131,12 +137,13 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         }
         isLoginWindowLoading = false
         didLogin = true
-        // 登录成功 → 收割 cookie（此刻认证会话已建立）。稍候片刻确保 httpCookieStore 已写入。
-        if let store = loginWebView?.configuration.websiteDataStore {
+        // 登录成功 → 收割 localStorage 的 JWT（认证凭据），供后台纯 HTTP 用 Bearer 复用。
+        if let wv = loginWebView {
             Task { [weak self] in
+                // 稍候片刻确保页面登录完成、localStorage token 已写入。
                 try? await Task.sleep(nanoseconds: 800_000_000)
-                let harvested = await self?.harvestCookies(from: store)
-                self?.log("登录成功，收割结果: \(harvested != nil ? "成功" : "失败(无cookie)")")
+                let token = await self?.harvestToken(from: wv)
+                self?.log("登录成功，token 收割结果: \(token != nil ? "成功" : "失败(未找到JWT)")")
                 self?.teardownLoginWindow()
                 NotificationCenter.default.post(name: .dsWebUsageUpdated, object: nil)
             }

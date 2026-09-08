@@ -287,6 +287,7 @@ struct DeepSeekProvider: QuotaProvider {
         var requestCount: Int?
         var message: String?
         if let webToken = discoverWebToken() {
+            // 网页会话 bearer token（~/.deepseek/web_token，由内嵌登录收割 localStorage JWT 写入）
             do {
                 let web = try await fetchWebUsage(bearer: webToken)
                 applyWeb(web, to: &balances, &tokenUsage, &requestCount)
@@ -296,32 +297,10 @@ struct DeepSeekProvider: QuotaProvider {
             } catch {
                 message = "用量统计不可用（\(error.localizedDescription)）"
             }
-        } else if let cookieHeader = discoverWebCookies() {
-            do {
-                let web = try await fetchWebUsage(cookie: cookieHeader)
-                applyWeb(web, to: &balances, &tokenUsage, &requestCount)
-                if web.isEmpty { message = "网页用量接口未返回数据" }
-            } catch let QuotaError.sessionExpired(msg) {
-                message = msg
-            } catch {
-                message = "用量统计不可用（\(error.localizedDescription)）"
-            }
         } else {
-            // 既无 bearer 也无 cookie：尝试一次性从内嵌会话收割 cookie（若上次 WebView 登录仍在），
-            // 收割成功即走上面的 cookie HTTP 路径；否则提示用户主动登录。绝不在此冷启动 usage 整站。
-            if let header = await DeepSeekWebSession.shared.harvestStoredCookies() {
-                do {
-                    let web = try await fetchWebUsage(cookie: header)
-                    applyWeb(web, to: &balances, &tokenUsage, &requestCount)
-                    if web.isEmpty { message = "网页用量接口未返回数据" }
-                } catch let QuotaError.sessionExpired(msg) {
-                    message = msg
-                } catch {
-                    message = "用量统计不可用（\(error.localizedDescription)）"
-                }
-            } else {
-                message = "未开启今日用量：点下方「登录 DeepSeek」"
-            }
+            // 无网页会话 token：提示用户在面板点「登录 DeepSeek」。
+            // 绝不在此创建 WebView——后台纯 HTTP，杜绝 WebKit 渲染内存滚雪球。
+            message = "未开启今日用量：点下方「登录 DeepSeek」"
         }
 
         return ProviderSnapshot(
@@ -393,6 +372,12 @@ struct DeepSeekProvider: QuotaProvider {
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
             request.setValue("application/json", forHTTPHeaderField: "Accept")
+            // 网页接口由华为 WAF 反爬：非浏览器请求会被 "Request Blocked" 拦截，
+            // 需带上浏览器 User-Agent + 同源 Referer/Origin 才能通过。
+            request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+                             forHTTPHeaderField: "User-Agent")
+            request.setValue("https://platform.deepseek.com/", forHTTPHeaderField: "Referer")
+            request.setValue("https://platform.deepseek.com", forHTTPHeaderField: "Origin")
             auth(&request)
             let (data, response) = try await Support.session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
@@ -525,18 +510,10 @@ struct DeepSeekProvider: QuotaProvider {
         }
     }
 
+    /// 读取内嵌登录收割后落盘的 DeepSeek 网页会话 JWT（由 DeepSeekWebSession 写入 ~/.deepseek/web_token）。
     private func discoverWebToken() -> String? {
         if let value = ProcessInfo.processInfo.environment["DEEPSEEK_WEB_TOKEN"].flatMap(Support.string) { return value }
         let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".deepseek/web_token")
-        guard FileManager.default.fileExists(atPath: url.path),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    /// 读取内嵌登录收割后落盘的 DeepSeek 网页会话 Cookie 头（由 DeepSeekWebSession 写入）。
-    private func discoverWebCookies() -> String? {
-        let url = DeepSeekWebSession.cookieFileURL
         guard FileManager.default.fileExists(atPath: url.path),
               let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
