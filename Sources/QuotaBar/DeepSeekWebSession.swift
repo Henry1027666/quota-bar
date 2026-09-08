@@ -5,6 +5,11 @@ import WebKit
 /// 之后由会话持久化（cookie/token 存在 QuotaBar 自己的 WebKit 数据目录，不触碰外部浏览器）。
 /// 页面加载时会自动请求 /api/v0 用量接口，本类在 document-start 注入拦截脚本，
 /// 把页面自身发起的用量响应转发给 Swift 解析——QuotaBar 不接触任何认证材料本身。
+///
+/// 内存说明：WKWebView 会派生 WebContent/GPU/Network 多个辅助进程，冷启动完整 usage 页
+/// 内存可达数百 MB。因此本类 **常驻复用单个后台 webView**（懒加载后整个会话期间复用），
+/// 绝不每个刷新周期 `new` 一个——否则辅助进程组反复重建、缓存不释放，内存会滚雪球到数百 MB 并卡死
+/// （曾在实测中从 ~40MB 飙升至 ~800MB 无响应）。
 @MainActor
 final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     static let shared = DeepSeekWebSession()
@@ -29,7 +34,11 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         case timeout
     }
 
-    private var webView: WKWebView?
+    /// 常驻复用的后台 webView。仅在首次需要时创建一次；后台 fetch 与登录窗口共用同一个，
+    /// 绝不为每次后台刷新新建。此成员是内存问题的根治点。
+    private var persistentWebView: WKWebView?
+    /// 登录窗口持有的 webView 视图引用（登录窗口关闭即释放，与后台复用实例解耦）。
+    private var loginWebView: WKWebView?
     private var loginWindow: NSWindow?
     private var pending: CheckedContinuation<SessionResult?, Never>?
     private var collected: [String: Any] = [:]
@@ -49,17 +58,23 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
 
     func fetchUsage() async -> SessionResult {
         guard isLoggedIn else { log("fetchUsage: 未登录，直接跳过"); return .notLoggedIn }
-        if pending != nil { log("fetchUsage: 已有请求进行中"); return .timeout }
+        // 并发互斥：已有后台 fetch 或登录窗口正在加载时，直接返回，不重复创建/加载 WebView。
+        guard !isLoginWindowLoading else { log("fetchUsage: 登录窗口加载中，跳过"); return .timeout }
+        guard pending == nil else { log("fetchUsage: 已有请求进行中"); return .timeout }
+
         received = []
         collected = [:]
-        let result: SessionResult? = await withCheckedContinuation { cont in
-            pending = cont
-            let wv = makeWebView()
-            webView = wv
-            log("fetchUsage: 后台加载 \(Self.usageURL.absoluteString)")
+        let result: SessionResult? = await withCheckedContinuation { [weak self] cont in
+            guard let self else { cont.resume(returning: .timeout); return }
+            self.pending = cont
+            // 复用常驻后台实例；不存在才懒创建。
+            let wv = self.persistentWebView ?? self.makePersistentWebView()
+            self.persistentWebView = wv
+            log("fetchUsage: 后台加载(复用实例) \(Self.usageURL.absoluteString)")
+            wv.stopLoading()
             wv.load(URLRequest(url: Self.usageURL))
-            scheduleCheckpoints()
-            timeoutTask = Task { [weak self] in
+            self.scheduleCheckpoints()
+            self.timeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 25_000_000_000)
                 self?.log("fetchUsage: 25s 超时")
                 self?.finish(.timeout)
@@ -77,8 +92,11 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
             NSApp.activate(ignoringOtherApps: true)
             return
         }
+        // 登录窗口是用户显式操作，使用独立轻量 webView（用完释放），不复用后台实例，
+        // 避免后台刷新恰好在同一时刻触发时互相干扰导航与收集状态。
         isLoginWindowLoading = true
         let wv = makeWebView()
+        loginWebView = wv
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 920, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -90,6 +108,8 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         window.center()
         window.setFrameAutosaveName("DeepSeekLoginWindow")
         loginWindow = window
+        // 窗口关闭时清理登录专用 webView，避免泄漏。
+        window.delegate = self
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         log("打开登录窗口，加载 \(Self.usageURL.absoluteString)")
@@ -136,6 +156,9 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         if isLoginWindowLoading {
             guard loginWindow != nil else { return }
             isLoginWindowLoading = false
+            // 登录成功即回收登录专用实例，避免窗口关闭后仍常驻吃内存。
+            loginWebView?.stopLoading()
+            loginWebView = nil
             loginWindow?.close()
             loginWindow = nil
             log("登录窗口: 用量数据已取得，自动关闭并通知面板刷新")
@@ -186,7 +209,30 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         }
     }
 
+    // MARK: - NSWindowDelegate（登录窗口关闭时清理）
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === loginWindow else { return }
+        log("登录窗口关闭，清理登录专用资源")
+        isLoginWindowLoading = false
+        loginWebView?.stopLoading()
+        loginWebView = nil
+        loginWindow = nil
+        // 若后台 fetch 正在等待（正常不会，因互斥），兜底释放。
+        if pending != nil {
+            finish(.timeout)
+        }
+    }
+
     // MARK: - 私有
+
+    /// 创建后台复用实例。相较登录窗口实例，额外把 `webView` 保持弱引用到 self 之外的生命周期——
+    /// 这里用类持有的强引用 `persistentWebView` 保证其跨刷新存活（内存稳定的关键）。
+    private func makePersistentWebView() -> WKWebView {
+        let webView = makeWebView()
+        // 后台实例：为避免挂载到窗口，保持独立存在即可；WKWebView 无需加进视图层级即可 load。
+        return webView
+    }
 
     private func makeWebView() -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -212,11 +258,11 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         timeoutTask?.cancel()
         timeoutTask = nil
         cont.resume(returning: result)
-        // 后台 webview 用完即弃（登录窗口的 webview 保留）
-        if loginWindow == nil {
-            webView?.stopLoading()
-            webView = nil
-        }
+        // 后台实例保持复用，不销毁——下一个周期继续复用同一实例，WebKit 辅助进程组只初始化一次。
+        // 但取完数据立即导航到空白页，卸载 usage 站点的图表/数据卷渲染，把渲染内存释放回系统，
+        // 只保留轻量的 WebKit 进程骨架。这样既避免反复冷启动，又不让重型页面常驻吃内存。
+        persistentWebView?.stopLoading()
+        persistentWebView?.load(URLRequest(url: URL(string: "about:blank")!))
     }
 
     private func log(_ message: String) {
@@ -280,6 +326,8 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
     })();
     """#
 }
+
+extension DeepSeekWebSession: NSWindowDelegate {}
 
 extension Notification.Name {
     /// DeepSeek 登录窗口内完成登录并取得用量数据后发出，面板应刷新。
