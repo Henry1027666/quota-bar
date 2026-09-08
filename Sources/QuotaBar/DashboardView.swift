@@ -71,7 +71,7 @@ struct DashboardView: View {
             footer
         }
         .padding(14)
-        .frame(width: 430)
+        .frame(width: 350)
         .background(VisualEffectBackground(opacity: 0.7))
         .background(
             GeometryReader { geo in
@@ -172,7 +172,7 @@ private struct ProviderCard: View {
                         }
                     }
                 }
-                if snapshot.tokenUsage != nil || snapshot.requestCount != nil {
+                if kind != .deepSeek, snapshot.tokenUsage != nil || snapshot.requestCount != nil {
                     VStack(spacing: 4) {
                         if let tokens = snapshot.tokenUsage {
                             HStack {

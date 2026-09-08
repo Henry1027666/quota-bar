@@ -287,19 +287,24 @@ struct DeepSeekProvider: QuotaProvider {
         var requestCount: Int?
         var message: String?
         if let webToken = discoverWebToken() {
+            Log.append("DS", "发现网页会话 token (前缀 \(webToken.prefix(12))…)，拉取用量接口")
             // 网页会话 bearer token（~/.deepseek/web_token，由内嵌登录收割 localStorage JWT 写入）
             do {
                 let web = try await fetchWebUsage(bearer: webToken)
                 applyWeb(web, to: &balances, &tokenUsage, &requestCount)
+                Log.append("DS", "用量接口成功: balances=\(web.balances.count) tokens=\(String(describing: web.tokenUsage)) req=\(String(describing: web.requestCount))")
                 if web.isEmpty { message = "网页用量接口未返回数据" }
             } catch let QuotaError.sessionExpired(msg) {
+                Log.append("DS", "用量接口 → 登录过期: \(msg)")
                 message = msg
             } catch {
+                Log.append("DS", "用量接口 → 失败: \(error.localizedDescription)")
                 message = "用量统计不可用（\(error.localizedDescription)）"
             }
         } else {
             // 无网页会话 token：提示用户在面板点「登录 DeepSeek」。
             // 绝不在此创建 WebView——后台纯 HTTP，杜绝 WebKit 渲染内存滚雪球。
+            Log.append("DS", "未发现网页会话 token")
             message = "未开启今日用量：点下方「登录 DeepSeek」"
         }
 
@@ -383,8 +388,17 @@ struct DeepSeekProvider: QuotaProvider {
             guard let http = response as? HTTPURLResponse else {
                 throw QuotaError.invalidResponse("未收到有效响应")
             }
-            guard (200..<300).contains(http.statusCode) else { throw QuotaError.http(http.statusCode) }
-            return try JSONSerialization.jsonObject(with: data)
+            Log.append("DS", "后台GET \(url.path) → HTTP \(http.statusCode)")
+            guard (200..<300).contains(http.statusCode) else {
+                let snippet = String(data: data.prefix(200), encoding: .utf8) ?? ""
+                Log.append("DS", "后台GET失败 HTTP \(http.statusCode) body: \(snippet)")
+                throw QuotaError.http(http.statusCode)
+            }
+            let parsed = try JSONSerialization.jsonObject(with: data)
+            if let dict = parsed as? [String: Any] {
+                Log.append("DS", "后台GET \(url.path) code=\(dict["code"] ?? "?")")
+            }
+            return parsed
         }
 
         var result = WebUsage()
@@ -441,21 +455,29 @@ struct DeepSeekProvider: QuotaProvider {
         result.tokenUsage = tokens
     }
 
-    /// by_api_key/cost：data[].series[].buckets[].cost 逐日求和（近 30 天消费）。
+    /// by_api_key/cost：data[].series[].buckets[].cost 逐日求和（今日消费 + 近 30 天消费）。
     private static func parseCost(_ json: Any, into result: inout WebUsage) {
         guard let biz = bizData(json),
               let data = biz["data"] as? [[String: Any]] else { return }
         var total = 0.0
+        var today = 0.0
         var currency = "CNY"
+        // 东八区「今天 00:00」的 bucket（usageRange 的 end 是明天 0 点，往前一天即今天）。
+        let todayTime = usageRange().end - 86400
         for entry in data {
             if let c = Support.firstString(in: entry, keys: ["currency"]), !c.isEmpty { currency = c }
             for item in (entry["series"] as? [[String: Any]] ?? []) {
                 for bucket in (item["buckets"] as? [[String: Any]] ?? []) {
-                    total += Support.firstNumber(in: bucket, keys: ["cost", "amount"]) ?? 0
+                    let cost = Support.firstNumber(in: bucket, keys: ["cost", "amount"]) ?? 0
+                    total += cost
+                    if let t = Support.firstNumber(in: bucket, keys: ["time"]), Int(t) == Int(todayTime) {
+                        today += cost
+                    }
                 }
             }
         }
-        // 近30天消费：核心指标，0 也显示
+        // 核心指标：0 也显示
+        result.balances.append(MoneyBalance(label: "今日消费", amount: (today * 100).rounded() / 100, currency: currency))
         result.balances.append(MoneyBalance(label: "近30天消费", amount: (total * 100).rounded() / 100, currency: currency))
     }
 
@@ -517,7 +539,14 @@ struct DeepSeekProvider: QuotaProvider {
         guard FileManager.default.fileExists(atPath: url.path),
               let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty else { return nil }
+        // 兼容 DeepSeek 网页端 JSON 包装格式：{"value":"<token>","__version":"0"} → 取 value。
+        if let data = trimmed.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let value = obj["value"] as? String, !value.isEmpty {
+            return value
+        }
+        return trimmed
     }
 
     private func discoverAPIKey() -> String? {

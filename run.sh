@@ -24,6 +24,9 @@ fi
 
 # 已有实例则先退出，避免重复
 pkill -f "$project_dir/.build/release/QuotaBar" 2>/dev/null || true
+# 兜底：个别实例可能卡死（对 SIGTERM 无响应），2 秒后强制终止，保证恒为单实例
+sleep 2
+pkill -9 -f "$project_dir/.build/release/QuotaBar" 2>/dev/null || true
 
 # 后台启动，图标直接出现在菜单栏
 nohup "$project_dir/.build/release/QuotaBar" >/dev/null 2>&1 &

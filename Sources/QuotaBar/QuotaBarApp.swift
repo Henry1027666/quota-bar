@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 430, height: 620)
+        popover.contentSize = NSSize(width: 350, height: 620)
         let hosting = NSHostingController(
             rootView: DashboardView(store: store) { [weak self] height in
                 self?.updatePopoverContentSize(height: height)
@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updatePopoverContentSize(height: CGFloat) {
         guard let popover else { return }
         let clamped = min(max(height, 120), 620)
-        let newSize = NSSize(width: 430, height: clamped)
+        let newSize = NSSize(width: 350, height: clamped)
         if abs(newSize.height - popover.contentSize.height) > 1 {
             popover.contentSize = newSize
         }

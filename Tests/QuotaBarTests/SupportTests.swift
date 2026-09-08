@@ -66,7 +66,11 @@ import Testing
         "code": 0, "data": ["biz_code": 0, "biz_data": [
             "data": [["currency": "CNY", "series": [[
                 "api_key": ["name": "qingyao-copilot"],
-                "buckets": [["cost": "1.5", "time": 1786204800], ["cost": "2.25", "time": 1786291200]]
+                "buckets": [
+                    ["cost": "1.5", "time": 1786204800],
+                    ["cost": "2.25", "time": 1786291200],
+                    ["cost": "0.75", "time": todayStartUTC]
+                ]
             ]]]]
         ]]
     ]
@@ -80,10 +84,19 @@ import Testing
     #expect(web?.requestCount == 7)
     #expect(web?.tokenUsage == 750)
     #expect(web?.balances.contains { $0.label == "累计消费" && abs($0.amount - 519.49) < 0.01 } == true)
-    #expect(web?.balances.contains { $0.label == "近30天消费" && abs($0.amount - 3.75) < 0.01 } == true)
+    #expect(web?.balances.contains { $0.label == "今日消费" && abs($0.amount - 0.75) < 0.01 } == true)
+    #expect(web?.balances.contains { $0.label == "近30天消费" && abs($0.amount - 4.50) < 0.01 } == true)
     // 充值余额与官方 API 余额重复，不重复展示；零值赠送余额也不显示
     #expect(web?.balances.contains { $0.label == "充值余额" } == false)
     #expect(web?.balances.contains { $0.label == "赠送余额" } == false)
+}
+
+/// 东八区「今天 00:00」的 epoch（与 DeepSeek 用量接口 tz=28800 口径一致）。
+private var todayStartUTC: TimeInterval {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+    let start = cal.startOfDay(for: Date())
+    return start.timeIntervalSince1970
 }
 
 @Test func kimiParsesFiveHourWindowWhenQuotaExhausted() {

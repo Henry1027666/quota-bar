@@ -1,5 +1,44 @@
 import Foundation
 
+/// 落盘日志（App 常驻，Log 由 run.sh 丢弃到 /dev/null，无法事后排查）。
+/// 统一写到 ~/.deepseek/quotabar.log，日期+级别+消息，供排障时 cat 查看。
+enum Log {
+    private static let lock = NSLock()
+
+    /// ~/.deepseek/quotabar.log
+    static let fileURL: URL = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".deepseek/quotabar.log")
+    }()
+
+    static func append(_ component: String, _ message: String) {
+        let line = "[\(Self.timestamp())][\(component)] \(message)"
+        // NSLog 保留（供 Console.app / 崩溃诊断参考），磁盘日志用于 run.sh 丢弃后的排查。
+        NSLog("%@", line)
+        lock.lock()
+        defer { lock.unlock() }
+        do {
+            let dir = fileURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let handle = try FileHandle(forWritingTo: fileURL)
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            if let data = (line + "\n").data(using: .utf8) { handle.write(data) }
+        } catch {
+            // 首次创建文件
+            do {
+                try (line + "\n").write(to: fileURL, atomically: true, encoding: .utf8)
+            } catch { /* 忽略写日志失败 */ }
+        }
+    }
+
+    static func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter.string(from: Date())
+    }
+}
+
 enum Support {
     static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral

@@ -81,30 +81,81 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".deepseek/web_token")
     }
 
-    /// 从登录窗口 webView 的 localStorage 收割 DeepSeek JWT（userToken），原子写盘 `~/.deepseek/web_token`。
-    /// 页面此刻加载于 platform.deepseek.com，同源可读 localStorage。JWT 以 `eyJ` 开头。
+    /// 从登录窗口 webView 的存储区收割 DeepSeek JWT，原子写盘 `~/.deepseek/web_token`。
+    /// 页面此刻加载于 platform.deepseek.com，同源可读 localStorage / sessionStorage。
+    /// 返回 nil 时调用方应读取诊断（本方法会把两个 storage 的 key/value 前缀写日志）。
     private func harvestToken(from webView: WKWebView) async -> String? {
-        // 遍历 localStorage，取第一个 JWT 格式的值（宽松匹配，兼容 key 名变化）。
+        // 同时探测 localStorage 与 sessionStorage：
+        // 1) 精确取名为 userToken 的项（DeepSeek 网页端认证凭据）；
+        // 2) 否则遍历取第一个以 eyJ 开头（JWT）的值；
+        // 3) 顺带把两处所有 key + value 前缀回传，供收割失败时精确定位真实存储。
         let js = #"""
         (function () {
-          try {
-            var out = null;
-            for (var i = 0; i < localStorage.length; i++) {
-              var k = localStorage.key(i);
-              var v = localStorage.getItem(k);
-              if (v && v.indexOf('eyJ') === 0) { out = v; break; }
+          function dump(store) {
+            var arr = [];
+            try {
+              for (var i = 0; i < store.length; i++) {
+                var k = store.key(i);
+                var v = store.getItem(k) || '';
+                arr.push(k + '=[' + v.substring(0, 60) + ']');
+              }
+            } catch (e) {}
+            return arr;
+          }
+          // DeepSeek 的 userToken 存的是 JSON 包装：{"value":"<token>","__version":"0"}，
+          // 直接取整个字符串当 Bearer 会 40003。这里解包 value 字段。
+          function unwrap(v) {
+            if (v && typeof v === 'string' && v.charAt(0) === '{') {
+              try {
+                var o = JSON.parse(v);
+                if (o && typeof o.value === 'string') return o.value;
+              } catch (e) {}
             }
-            return out;
-          } catch (e) { return null; }
+            return v;
+          }
+          function firstJwt(store) {
+            try {
+              for (var i = 0; i < store.length; i++) {
+                var k = store.key(i);
+                var v = store.getItem(k);
+                if (v && typeof v === 'string') {
+                  var u = unwrap(v);
+                  if (u && u.indexOf('eyJ') === 0) return u;
+                }
+              }
+            } catch (e) {}
+            return null;
+          }
+          var LS = null, SS = null;
+          try { LS = window.localStorage; } catch (e) {}
+          try { SS = window.sessionStorage; } catch (e) {}
+          var explicit = null;
+          if (LS) { try { var e1 = LS.getItem('userToken'); explicit = unwrap(e1); } catch (e) {} }
+          if (!explicit && SS) { try { var e2 = SS.getItem('userToken'); explicit = unwrap(e2); } catch (e) {} }
+          var token = explicit || (LS ? firstJwt(LS) : null) || (SS ? firstJwt(SS) : null);
+          var diag = {
+            ls: LS ? dump(LS) : ['<unavailable>'],
+            ss: SS ? dump(SS) : ['<unavailable>'],
+            got: !!token,
+            prefix: token ? token.substring(0, 20) : null
+          };
+          try { window.webkit.messageHandlers.dsUsage.postMessage({ id: '__storage__', data: diag }); } catch (e) {}
+          return token;
         })()
         """#
         let token: String? = await withCheckedContinuation { cont in
+            let box = ContinuationBox(cont)
             webView.evaluateJavaScript(js) { result, _ in
-                cont.resume(returning: result as? String)
+                box.resume(result as? String)
+            }
+            // 兜底：evaluateJavaScript 回调缺失时 3s 后释放续体，
+            // 否则收割 Task 永久挂起、登录窗口永不关闭（表现为「卡死」）。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                box.resume(nil)
             }
         }
         guard let t = token?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else {
-            log("token收割: localStorage 未找到 JWT")
+            log("token收割: 两处存储均未定位到 JWT（详见 __storage__ 诊断）")
             return nil
         }
         do {
@@ -137,17 +188,19 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         }
         isLoginWindowLoading = false
         didLogin = true
+        log("登录判定: \(endpoint) code==0 ✅ 判定登录成功，开始收割 JWT")
         // 登录成功 → 收割 localStorage 的 JWT（认证凭据），供后台纯 HTTP 用 Bearer 复用。
         if let wv = loginWebView {
             Task { [weak self] in
-                // 稍候片刻确保页面登录完成、localStorage token 已写入。
+                // 稍候片刻确保页面登录完成、存储 token 已写入。
                 try? await Task.sleep(nanoseconds: 800_000_000)
                 let token = await self?.harvestToken(from: wv)
-                self?.log("登录成功，token 收割结果: \(token != nil ? "成功" : "失败(未找到JWT)")")
+                self?.log("登录成功，token 收割结果: \(token != nil ? "成功" : "失败(未定位到JWT)")")
                 self?.teardownLoginWindow()
                 NotificationCenter.default.post(name: .dsWebUsageUpdated, object: nil)
             }
         } else {
+            log("登录判定: webView 已为空，跳过收割")
             teardownLoginWindow()
             NotificationCenter.default.post(name: .dsWebUsageUpdated, object: nil)
         }
@@ -176,13 +229,24 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         guard message.name == "dsUsage",
               let body = message.body as? [String: Any],
               let id = body["id"] as? String else { return }
-        // 诊断上报不参与登录判定
-        if id == "__req__" { return }
+        // 存储区诊断上报（收割 JWT 失败时定位真实 key）
+        if id == "__storage__" {
+            if let data = body["data"] as? [String: Any] {
+                let ls = (data["ls"] as? [String]) ?? []
+                let ss = (data["ss"] as? [String]) ?? []
+                log("存储诊断 localStorage: \(ls.joined(separator: " ; "))")
+                log("存储诊断 sessionStorage: \(ss.joined(separator: " ; "))")
+                log("存储诊断 命中JWT: \(data["got"] ?? false) 前缀: \(data["prefix"] ?? "nil")")
+            }
+            return
+        }
         // 用量接口响应体（未登录也会发请求，但 code!=0；登录成功才 code==0）
         let payload = body["data"]
         if let dict = payload as? [String: Any],
            let code = (dict["code"] as? NSNumber)?.intValue ?? (dict["code"] as? Int) {
             log("接口 \(id) 返回 code=\(code)")
+        } else {
+            log("接口 \(id) 响应非标准(无code): \(String(describing: (payload as? [String: Any])?.keys))")
         }
         // 登录页发起了核心用量接口 → 依据响应体 code 判定是否真已登录。
         if id == Endpoint.amount || id == Endpoint.cost || id == Endpoint.summary {
@@ -235,7 +299,7 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
     }
 
     private func log(_ message: String) {
-        NSLog("[DSWeb] %@", message)
+        Log.append("DSWeb", message)
     }
 
     /// 页面注入脚本：拦截 DeepSeek 用量接口的 fetch/XHR，把**完整响应体**回传，
@@ -284,6 +348,26 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
 }
 
 extension DeepSeekWebSession: NSWindowDelegate {}
+
+/// 恰好 resume 一次的续体容器：收割 JS 回调与 3s 超时兜底竞争，先到者生效。
+private final class ContinuationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String?, Never>?
+    private var done = false
+
+    init(_ c: CheckedContinuation<String?, Never>) {
+        continuation = c
+    }
+
+    func resume(_ value: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !done, let c = continuation else { return }
+        done = true
+        continuation = nil
+        c.resume(returning: value)
+    }
+}
 
 extension Notification.Name {
     /// DeepSeek 登录窗口内完成登录并取得用量数据后发出，面板应刷新。
