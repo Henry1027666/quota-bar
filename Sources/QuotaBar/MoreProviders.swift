@@ -280,13 +280,25 @@ struct DeepSeekProvider: QuotaProvider {
         }.filter { $0.amount > 0 }
 
         // 网页用量统计（今日调用次数 / 消耗 / 本月消费）：
-        // 优先使用手动 token 文件（快速 HTTP 路径），否则走内嵌登录会话（自动路径）。
+        // 纯 HTTP 拉取——优先 bearer token（~/.deepseek/web_token），否则 DeepSeek 网页会话 cookie
+        // （~/.deepseek/web_cookies，由内嵌登录成功后收割）。两条都是轻量 URLSession，不创建任何 WebView，
+        // 避免后台反复加载 usage 整站导致的 WebKit 渲染内存滚雪球（曾实测 40MB→800MB 卡死）。
         var tokenUsage: Int?
         var requestCount: Int?
         var message: String?
         if let webToken = discoverWebToken() {
             do {
-                let web = try await fetchWebUsage(token: webToken)
+                let web = try await fetchWebUsage(bearer: webToken)
+                applyWeb(web, to: &balances, &tokenUsage, &requestCount)
+                if web.isEmpty { message = "网页用量接口未返回数据" }
+            } catch let QuotaError.sessionExpired(msg) {
+                message = msg
+            } catch {
+                message = "用量统计不可用（\(error.localizedDescription)）"
+            }
+        } else if let cookieHeader = discoverWebCookies() {
+            do {
+                let web = try await fetchWebUsage(cookie: cookieHeader)
                 applyWeb(web, to: &balances, &tokenUsage, &requestCount)
                 if web.isEmpty { message = "网页用量接口未返回数据" }
             } catch let QuotaError.sessionExpired(msg) {
@@ -295,14 +307,20 @@ struct DeepSeekProvider: QuotaProvider {
                 message = "用量统计不可用（\(error.localizedDescription)）"
             }
         } else {
-            switch await DeepSeekWebSession.shared.fetchUsage() {
-            case .data(let web):
-                applyWeb(web, to: &balances, &tokenUsage, &requestCount)
-                if web.isEmpty { message = "网页用量接口未返回数据" }
-            case .notLoggedIn:
+            // 既无 bearer 也无 cookie：尝试一次性从内嵌会话收割 cookie（若上次 WebView 登录仍在），
+            // 收割成功即走上面的 cookie HTTP 路径；否则提示用户主动登录。绝不在此冷启动 usage 整站。
+            if let header = await DeepSeekWebSession.shared.harvestStoredCookies() {
+                do {
+                    let web = try await fetchWebUsage(cookie: header)
+                    applyWeb(web, to: &balances, &tokenUsage, &requestCount)
+                    if web.isEmpty { message = "网页用量接口未返回数据" }
+                } catch let QuotaError.sessionExpired(msg) {
+                    message = msg
+                } catch {
+                    message = "用量统计不可用（\(error.localizedDescription)）"
+                }
+            } else {
                 message = "未开启今日用量：点下方「登录 DeepSeek」"
-            case .timeout:
-                message = "用量统计获取超时，可点下方按钮重试"
             }
         }
 
@@ -349,31 +367,55 @@ struct DeepSeekProvider: QuotaProvider {
         return result.isEmpty ? nil : result
     }
 
-    /// 调用 DeepSeek 开放平台网页端三个 /api/v0 接口，汇总「近 30 天请求/Token/消费、累计消费、余额」。
+    /// 用 bearer token（手动 ~/.deepseek/web_token）拉取三接口。
+    private func fetchWebUsage(bearer: String) async throws -> WebUsage {
+        try await fetchUsageEndpoints(auth: { request in
+            request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        })
+    }
+
+    /// 用网页会话 cookie 头（内嵌登录收割的 ~/.deepseek/web_cookies）拉取三接口。
+    /// 纯 URLSession，不创建任何 WebView。
+    private func fetchWebUsage(cookie: String) async throws -> WebUsage {
+        try await fetchUsageEndpoints(auth: { request in
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        })
+    }
+
+    /// 三个 /api/v0 接口的共同拉取逻辑，认证方式由 auth 闭包注入。
     /// 数据口径与平台「用量信息」页一致（by_api_key 接口，按东八区每天一个 bucket，共 30 天）。
-    private func fetchWebUsage(token: String) async throws -> WebUsage {
+    private func fetchUsageEndpoints(auth: (inout URLRequest) -> Void) async throws -> WebUsage {
         let base = "https://platform.deepseek.com/api/v0"
         let range = Self.usageRange()
         let tz = 8 * 3600
 
+        func get(_ url: URL) async throws -> Any {
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            auth(&request)
+            let (data, response) = try await Support.session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw QuotaError.invalidResponse("未收到有效响应")
+            }
+            guard (200..<300).contains(http.statusCode) else { throw QuotaError.http(http.statusCode) }
+            return try JSONSerialization.jsonObject(with: data)
+        }
+
         var result = WebUsage()
 
         // 1) 账户摘要：充值余额 / 赠送余额 / 累计消费
-        let summary = try await Support.jsonRequest(URL(string: "\(base)/users/get_user_summary")!, bearer: token)
+        let summary = try await get(URL(string: "\(base)/users/get_user_summary")!)
         try ensureWebSuccess(summary)
         Self.parseSummary(summary, into: &result)
 
         // 2) Token/请求用量（近 30 天）
-        let amount = try await Support.jsonRequest(
-            URL(string: "\(base)/usage/by_api_key/amount?start=\(Int(range.start))&end=\(Int(range.end))&tz=\(tz)")!,
-            bearer: token)
+        let amount = try await get(URL(string: "\(base)/usage/by_api_key/amount?start=\(Int(range.start))&end=\(Int(range.end))&tz=\(tz)")!)
         try ensureWebSuccess(amount)
         Self.parseAmount(amount, into: &result)
 
         // 3) 每日费用（近 30 天）
-        let cost = try await Support.jsonRequest(
-            URL(string: "\(base)/usage/by_api_key/cost?start=\(Int(range.start))&end=\(Int(range.end))&tz=\(tz)")!,
-            bearer: token)
+        let cost = try await get(URL(string: "\(base)/usage/by_api_key/cost?start=\(Int(range.start))&end=\(Int(range.end))&tz=\(tz)")!)
         try ensureWebSuccess(cost)
         Self.parseCost(cost, into: &result)
 
@@ -477,7 +519,7 @@ struct DeepSeekProvider: QuotaProvider {
         let dict = json as? [String: Any] ?? [:]
         if let code = Support.firstNumber(in: dict, keys: ["code"]), Int(code) != 0 {
             if Int(code) == 40002 || Int(code) == 40003 {
-                throw QuotaError.sessionExpired("DeepSeek 网页登录已过期，请更新 ~/.deepseek/web_token 或在面板内重新登录")
+                throw QuotaError.sessionExpired("DeepSeek 网页登录已过期，请在面板内重新登录")
             }
             throw QuotaError.invalidResponse("DeepSeek 网页接口错误（code \(Int(code))）")
         }
@@ -486,6 +528,15 @@ struct DeepSeekProvider: QuotaProvider {
     private func discoverWebToken() -> String? {
         if let value = ProcessInfo.processInfo.environment["DEEPSEEK_WEB_TOKEN"].flatMap(Support.string) { return value }
         let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".deepseek/web_token")
+        guard FileManager.default.fileExists(atPath: url.path),
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// 读取内嵌登录收割后落盘的 DeepSeek 网页会话 Cookie 头（由 DeepSeekWebSession 写入）。
+    private func discoverWebCookies() -> String? {
+        let url = DeepSeekWebSession.cookieFileURL
         guard FileManager.default.fileExists(atPath: url.path),
               let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
