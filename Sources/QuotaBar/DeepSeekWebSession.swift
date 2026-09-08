@@ -136,11 +136,20 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
     }
 
     private func teardownLoginWindow() {
+        // 先解除 delegate 与引用，再 close：close 会触发 windowWillClose，
+        // 若不先置 nil/解 delegate，windowWillClose 又回调 teardown → 无限递归导致栈溢出崩溃。
+        guard let window = loginWindow else {
+            loginWebView = nil
+            loginWindow = nil
+            isLoginWindowLoading = false
+            return
+        }
+        loginWindow = nil
+        window.delegate = nil
         loginWebView?.stopLoading()
         loginWebView = nil
-        loginWindow?.close()
-        loginWindow = nil
         isLoginWindowLoading = false
+        window.close()
     }
 
     // MARK: - WKScriptMessageHandler（页面拦截脚本回传，用于判定登录完成）
@@ -172,7 +181,12 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
 
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, window === loginWindow else { return }
-        teardownLoginWindow()
+        // 用户主动点关闭按钮。只清引用、不再次 close（避免与 teardownLoginWindow 相互递归）。
+        loginWindow = nil
+        window.delegate = nil
+        loginWebView?.stopLoading()
+        loginWebView = nil
+        isLoginWindowLoading = false
     }
 
     // MARK: - 私有
