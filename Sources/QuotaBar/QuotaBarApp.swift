@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             options: [.userInitiated, .latencyCritical],
             reason: "QuotaBar 常驻菜单栏轮询各厂商额度"
         )
+        startMemoryWatchdog()
 
         // 菜单栏图标：左键打开额度面板，右键弹出「退出」菜单（面板内不设退出按钮）。
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -54,6 +55,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 内存看门狗：每 60s 检查物理内存占用，超阈值把主线程调用栈写入日志，
+    /// 用于在卡死/内存飙升时留下定位证据（无需外部工具）。
+    private func startMemoryWatchdog(thresholdMB: Int = 500) {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                guard let self else { return }
+                let mb = Self.currentMemoryMB()
+                if mb > thresholdMB {
+                    Log.append("MEM", "内存 \(mb)MB 超阈值，主线程栈：\n\(Thread.callStackSymbols.joined(separator: "\n"))")
+                }
+            }
+        }
+    }
+
+    private static func currentMemoryMB() -> Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return Int(info.phys_footprint) / (1024 * 1024)
+    }
+
     @objc private func statusItemClicked(_ sender: Any?) {
         guard let button = statusItem?.button else { return }
         if NSApp.currentEvent?.type == .rightMouseUp {
@@ -64,12 +92,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 根据 DashboardView 实测内容高度调整 popover 尺寸（下限 120，上限 620）。
+    /// 高度自适应回调的重入锁：防止 setContentSize → 布局 → 高度回调 → setContentSize 的递归振荡。
+    private var isUpdatingPopoverSize = false
+
     private func updatePopoverContentSize(height: CGFloat) {
         guard let popover else { return }
         let clamped = min(max(height, 120), 620)
         let newSize = NSSize(width: 350, height: clamped)
-        if abs(newSize.height - popover.contentSize.height) > 1 {
-            popover.contentSize = newSize
+        guard abs(newSize.height - popover.contentSize.height) > 1 else { return }
+        // 布局原子操作（NSPerformVisuallyAtomicChange）内禁止同步重入，
+        // 否则会在同一次布局栈中无限递归（历史上导致 CPU 100% + UI 无响应）。
+        guard !isUpdatingPopoverSize else { return }
+        isUpdatingPopoverSize = true
+        DispatchQueue.main.async { [weak self] in
+            defer { self?.isUpdatingPopoverSize = false }
+            guard let self, let popover = self.popover else { return }
+            if abs(newSize.height - popover.contentSize.height) > 1 {
+                popover.contentSize = newSize
+            }
         }
     }
 
