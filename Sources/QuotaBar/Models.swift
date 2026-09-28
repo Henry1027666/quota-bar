@@ -100,7 +100,7 @@ struct ProviderSnapshot: Identifiable, Equatable, Sendable {
             || p.contains("pro") || p.contains("max") || p.contains("business") {
             return .tokenPlan
         }
-        if p == "api" || p.contains("api") { return .api }
+        if p.contains("api") { return .api }
         if p.contains("free") { return .free }
         // 未解析到套餐名：存在可用额度（窗口/余额）视为订阅档，否则视为免费。
         if p.isEmpty {

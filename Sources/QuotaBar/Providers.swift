@@ -114,7 +114,7 @@ struct CursorProvider: QuotaProvider {
         let payloads = await [summary, current].compactMap { $0 }
         var windows = payloads.flatMap { Support.parseGenericWindows($0) }
         var seen = Set<String>()
-        windows = windows.filter { seen.insert("\($0.title)-\($0.limit)-\($0.used)").inserted }
+        windows = windows.filter { seen.insert("\($0.title)-\($0.limit)-\($0.used)-\($0.resetAt?.timeIntervalSince1970 ?? 0)").inserted }
         let root = payloads.first as? [String: Any]
         let account = values["cursorAuth/cachedEmail"] ?? root.flatMap { Support.firstString(in: $0, keys: ["email"]) }
         let requests = payloads.lazy.compactMap(extractRequestCount).first

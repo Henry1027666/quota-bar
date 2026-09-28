@@ -118,7 +118,10 @@ struct KimiProvider: QuotaProvider {
         var request = URLRequest(url: URL(string: "https://auth.kimi.com/api/oauth/token")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let form = "client_id=17e5f671-d194-4dfb-9706-5516cb48c098&grant_type=refresh_token&refresh_token=\(refreshToken.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? refreshToken)"
+        // urlQueryAllowed 包含 &/=/+，直接用于 form value 会拆坏表单，需剔除后编码。
+        let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&=+"))
+        let encodedToken = refreshToken.addingPercentEncoding(withAllowedCharacters: allowed) ?? refreshToken
+        let form = "client_id=17e5f671-d194-4dfb-9706-5516cb48c098&grant_type=refresh_token&refresh_token=\(encodedToken)"
         request.httpBody = Data(form.utf8)
         guard let (data, response) = try? await Support.session.data(for: request),
               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
@@ -243,8 +246,12 @@ struct KimiProvider: QuotaProvider {
 
     private static func windowTitle(duration: Double, timeUnit: String) -> String {
         if timeUnit.contains("month") { return "月限额" }
-        if timeUnit.contains("day") && duration >= 7 { return "周限额" }
         if timeUnit.contains("week") { return "周限额" }
+        if timeUnit.contains("day") {
+            if duration >= 28 { return "月限额" }
+            if duration == 7 { return "周限额" }
+            return "\(Int(duration)) 天"
+        }
         if timeUnit.contains("minute"), duration == 300 { return "5 小时" }
         if timeUnit.contains("hour"), duration == 5 { return "5 小时" }
         if timeUnit.contains("minute") { return "\(Int(duration)) 分钟" }
@@ -277,12 +284,13 @@ struct DeepSeekProvider: QuotaProvider {
                 amount: amount,
                 currency: Support.firstString(in: row, keys: ["currency"]) ?? "CNY"
             )
-        }.filter { $0.amount > 0 }
+        }
 
         // 网页用量统计（今日调用次数 / 消耗 / 本月消费）：
-        // 纯 HTTP 拉取——优先 bearer token（~/.deepseek/web_token），否则 DeepSeek 网页会话 cookie
-        // （~/.deepseek/web_cookies，由内嵌登录成功后收割）。两条都是轻量 URLSession，不创建任何 WebView，
-        // 避免后台反复加载 usage 整站导致的 WebKit 渲染内存滚雪球（曾实测 40MB→800MB 卡死）。
+        // 纯 HTTP 拉取——DeepSeek 网页端登录态是 localStorage 的 userToken（JWT），
+        // 由「登录 DeepSeek」内嵌窗口收割写入 ~/.deepseek/web_token，后台以 Bearer 复用。
+        // 不创建任何 WebView，避免后台反复加载 usage 整站导致的 WebKit 渲染内存滚雪球
+        // （曾实测 40MB→800MB 卡死）。
         var tokenUsage: Int?
         var requestCount: Int?
         var message: String?
@@ -351,18 +359,10 @@ struct DeepSeekProvider: QuotaProvider {
         return result.isEmpty ? nil : result
     }
 
-    /// 用 bearer token（手动 ~/.deepseek/web_token）拉取三接口。
+    /// 用 bearer token（~/.deepseek/web_token，由内嵌登录收割 localStorage JWT 写入）拉取三接口。
     private func fetchWebUsage(bearer: String) async throws -> WebUsage {
         try await fetchUsageEndpoints(auth: { request in
             request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
-        })
-    }
-
-    /// 用网页会话 cookie 头（内嵌登录收割的 ~/.deepseek/web_cookies）拉取三接口。
-    /// 纯 URLSession，不创建任何 WebView。
-    private func fetchWebUsage(cookie: String) async throws -> WebUsage {
-        try await fetchUsageEndpoints(auth: { request in
-            request.setValue(cookie, forHTTPHeaderField: "Cookie")
         })
     }
 
@@ -392,6 +392,10 @@ struct DeepSeekProvider: QuotaProvider {
             guard (200..<300).contains(http.statusCode) else {
                 let snippet = String(data: data.prefix(200), encoding: .utf8) ?? ""
                 Log.append("DS", "后台GET失败 HTTP \(http.statusCode) body: \(snippet)")
+                // HTTP 层 401/403 同样是登录态失效（WAF/网关可能直接拦截），与 code 40002/40003 同等处理。
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    throw QuotaError.sessionExpired("DeepSeek 网页登录已过期，请在面板内重新登录")
+                }
                 throw QuotaError.http(http.statusCode)
             }
             let parsed = try JSONSerialization.jsonObject(with: data)
@@ -413,10 +417,10 @@ struct DeepSeekProvider: QuotaProvider {
         try ensureWebSuccess(amount)
         Self.parseAmount(amount, into: &result)
 
-        // 3) 每日费用（近 30 天）
+        // 3) 每日费用（近 30 天）；todayStart 复用上面已算好的区间，避免跨零点两次计算口径不一致
         let cost = try await get(URL(string: "\(base)/usage/by_api_key/cost?start=\(Int(range.start))&end=\(Int(range.end))&tz=\(tz)")!)
         try ensureWebSuccess(cost)
-        Self.parseCost(cost, into: &result)
+        Self.parseCost(cost, into: &result, todayStart: range.end - 86400)
 
         return result
     }
@@ -456,14 +460,14 @@ struct DeepSeekProvider: QuotaProvider {
     }
 
     /// by_api_key/cost：data[].series[].buckets[].cost 逐日求和（今日消费 + 近 30 天消费）。
-    private static func parseCost(_ json: Any, into result: inout WebUsage) {
+    /// todayStart 为东八区「今天 00:00」的 epoch；传 nil 时按当前时间推算（测试与独立解析用）。
+    private static func parseCost(_ json: Any, into result: inout WebUsage, todayStart: TimeInterval? = nil) {
         guard let biz = bizData(json),
               let data = biz["data"] as? [[String: Any]] else { return }
         var total = 0.0
         var today = 0.0
         var currency = "CNY"
-        // 东八区「今天 00:00」的 bucket（usageRange 的 end 是明天 0 点，往前一天即今天）。
-        let todayTime = usageRange().end - 86400
+        let todayTime = todayStart ?? (usageRange().end - 86400)
         for entry in data {
             if let c = Support.firstString(in: entry, keys: ["currency"]), !c.isEmpty { currency = c }
             for item in (entry["series"] as? [[String: Any]] ?? []) {

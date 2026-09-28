@@ -1,14 +1,17 @@
 import Foundation
 
 /// 落盘日志（App 常驻，Log 由 run.sh 丢弃到 /dev/null，无法事后排查）。
-/// 统一写到 ~/.deepseek/quotabar.log，日期+级别+消息，供排障时 cat 查看。
+/// 统一写到 ~/Library/Logs/QuotaBar/quotabar.log，日期+级别+消息，供排障时 cat 查看。
+/// 超过 1MB 自动截断保留后半段，避免常驻应用日志无限增长。
 enum Log {
     private static let lock = NSLock()
+    private static let maxBytes: UInt64 = 1_000_000
 
-    /// ~/.deepseek/quotabar.log
+    /// ~/Library/Logs/QuotaBar/quotabar.log
     static let fileURL: URL = {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".deepseek/quotabar.log")
+        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library")
+        return logs.appendingPathComponent("Logs/QuotaBar/quotabar.log")
     }()
 
     static func append(_ component: String, _ message: String) {
@@ -17,6 +20,7 @@ enum Log {
         NSLog("%@", line)
         lock.lock()
         defer { lock.unlock() }
+        rotateIfNeeded()
         do {
             let dir = fileURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -30,6 +34,15 @@ enum Log {
                 try (line + "\n").write(to: fileURL, atomically: true, encoding: .utf8)
             } catch { /* 忽略写日志失败 */ }
         }
+    }
+
+    /// 超过 maxBytes 时保留文件后半段（原子重写），保证排障时看到的都是近期日志。
+    private static func rotateIfNeeded() {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.size] as? UInt64,
+              size > maxBytes,
+              let data = try? Data(contentsOf: fileURL) else { return }
+        let tail = Data(data.suffix(Int(maxBytes / 2)))
+        try? tail.write(to: fileURL, options: .atomic)
     }
 
     static func timestamp() -> String {
@@ -150,13 +163,36 @@ enum Support {
         } else {
             try process.run()
         }
+        // 必须与子进程并行读取 stdout/stderr：若先 waitUntilExit 再读，
+        // 输出一旦超过管道缓冲（macOS 64KB）子进程写阻塞，父子互等造成死锁。
+        let outBox = DataBox()
+        let errBox = DataBox()
+        let reads = DispatchGroup()
+        reads.enter()
+        DispatchQueue.global().async {
+            outBox.set(output.fileHandleForReading.readDataToEndOfFile())
+            reads.leave()
+        }
+        reads.enter()
+        DispatchQueue.global().async {
+            errBox.set(error.fileHandleForReading.readDataToEndOfFile())
+            reads.leave()
+        }
         process.waitUntilExit()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
+        reads.wait()
+        let data = outBox.data
         if process.terminationStatus != 0 {
-            let detail = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let detail = String(data: errBox.data, encoding: .utf8) ?? ""
             throw QuotaError.command(detail.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    /// 供管道读取结果跨线程回传的容器（一次性写入，读前已由 DispatchGroup 保证完成）。
+    private final class DataBox: @unchecked Sendable {
+        private var storage = Data()
+        func set(_ data: Data) { storage = data }
+        var data: Data { storage }
     }
 
     static func parseGenericWindows(_ value: Any, preferredLabels: [String: String] = [:]) -> [QuotaWindow] {

@@ -18,24 +18,22 @@ swift test
 swift run QuotaBar
 ```
 
-一键启动（保证菜单栏图标显示，推荐）：
+一键构建 + 打包 .app + 启动（推荐）：
 
 ```bash
 ./run.sh
 ```
 
-开机自启（登录时自动运行）：
+`run.sh` 会按源码新旧自动增量构建 release、组装 `.build/QuotaBar.app`（LSUIElement，无 Dock 图标）、
+ad-hoc 签名、退出旧实例并经 LaunchServices 启动（保证单实例）。
 
-```bash
-# 已安装：~/Library/LaunchAgents/com.henryzhang.quotabar.plist
-# 卸载自启：
-launchctl bootout gui/$(id -u)/com.henryzhang.quotabar
-rm ~/Library/LaunchAgents/com.henryzhang.quotabar.plist
-```
+前置要求：`xcode-select` 指向 Xcode（CommandLineTools 缺少 SwiftUIMacros 插件，无法编译 SwiftUI），
+并已执行过 `sudo xcodebuild -license accept`。
 
-> 说明：macOS 26 (Tahoe) 会把「打包成 `.app` 的第三方菜单栏应用」的图标
-> 默认放入控制中心隐藏区（blocked host），且应用无法编程绕过；直接运行
-> 可执行文件（不经 LaunchServices）则图标正常显示。因此本项目不打包 `.app`，
-> 统一通过 `run.sh` / LaunchAgent 直接运行可执行文件。
+> 注意：以 .app 启动时不继承 shell 环境变量（如 `DEEPSEEK_API_KEY`、`CODEX_HOME`）。
+> 各厂商认证按「环境变量 → 本机配置文件」顺序发现，依赖环境变量的场景请落盘到对应配置文件。
+
+> 提示：macOS 可能把第三方菜单栏应用的图标默认收入控制中心隐藏区，
+> 若启动后看不到图标，请在「控制中心 → 菜单栏」中把 QuotaBar 点亮。
 
 所有认证仅在本机内存中用于请求对应厂商接口，不写入 Quota Bar 自有存储。

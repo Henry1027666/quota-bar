@@ -7,13 +7,13 @@ import WebKit
 /// WKWebView 派生 WebContent/GPU/Network 辅助进程、SPA 整页渲染内存极高且不随导航释放，
 /// 导致进程内存从 ~40MB 滚雪球到 ~800MB 并卡死（实测两次复发）。
 ///
-/// 现在架构改为「登录一次、收割会话 cookie、后台全走轻量 HTTP」：
+/// 现在架构改为「登录一次、收割 localStorage JWT、后台全走轻量 HTTP」：
 ///   1. `showLoginWindow()`——用户**主动**点击「登录 DeepSeek」时弹出的 WKWebView，仅此一处会创建 WebView，
-///      一次性、用完即回收。登录成功后页面会请求三接口，脚本拦截到即认为登录完成，随即自动关闭窗口。
-///   2. 登录完成即刻 `harvestCookies(from:)`：把 WebKit 会话 cookie 收割、编码成 `Cookie:` 头写入
-///      `~/.deepseek/web_cookies`。
-///   3. 后台刷新不再触碰 WebView——`DeepSeekProvider` 读取该 cookie 头，用纯 URLSession 直调三接口；
-///      若 cookie 过期则由 `harvestStoredCookies()` 尝试从持久化 WebKit 数据存储重新收割，仍无则提示重新登录。
+///      一次性、用完即回收。登录成功后页面会请求三接口，脚本拦截到 code==0 响应即判定登录完成，随即自动关闭窗口。
+///   2. 登录完成即刻 `harvestToken(from:)`：DeepSeek 网页端登录态不靠 cookie（cookie 里只有 WAF/追踪项），
+///      真正的凭据是 localStorage 的 `userToken`（JWT），收割后原子写入 `~/.deepseek/web_token`。
+///   3. 后台刷新不再触碰 WebView——`DeepSeekProvider` 读取该 JWT，用纯 URLSession 以 Bearer 直调三接口；
+///      若 token 过期（接口 code 40002/40003 或 HTTP 401/403）则提示用户在面板内重新登录。
 @MainActor
 final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     static let shared = DeepSeekWebSession()

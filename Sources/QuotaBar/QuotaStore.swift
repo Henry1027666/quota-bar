@@ -28,7 +28,12 @@ final class QuotaStore: ObservableObject {
         if !force, let last = lastRefreshedAt, Date().timeIntervalSince(last) < maxStale {
             return
         }
-        guard !isRefreshing else { return }
+        // 与进行中的刷新撞车：非强制直接跳过；强制刷新等当前一轮结束后自己再跑，
+        // 避免用户点刷新按钮时请求被静默丢弃、界面毫无反应。
+        while isRefreshing {
+            guard force else { return }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
         isRefreshing = true
         await withTaskGroup(of: (ProviderKind, ProviderState).self) { group in
             for provider in providers {
@@ -59,5 +64,5 @@ final class QuotaStore: ObservableObject {
         }
     }
 
-    private static let defaultRefreshInterval: TimeInterval = 300 // 5 分钟
+    private nonisolated static let defaultRefreshInterval: TimeInterval = 300 // 5 分钟
 }

@@ -172,11 +172,12 @@ private struct ProviderCard: View {
                         }
                     }
                 }
-                if kind != .deepSeek, snapshot.tokenUsage != nil || snapshot.requestCount != nil {
+                if snapshot.tokenUsage != nil || snapshot.requestCount != nil {
                     VStack(spacing: 4) {
                         if let tokens = snapshot.tokenUsage {
                             HStack {
-                                Text("Tokens").foregroundStyle(.secondary)
+                                // DeepSeek 的用量接口按近 30 天汇总，其余厂商为当前周期口径
+                                Text(kind == .deepSeek ? "Tokens · 近30天" : "Tokens").foregroundStyle(.secondary)
                                 Spacer()
                                 Text(tokens.formatted(.number.notation(.compactName)))
                                     .monospacedDigit()
@@ -185,7 +186,7 @@ private struct ProviderCard: View {
                         }
                         if let requests = snapshot.requestCount {
                             HStack {
-                                Text("请求").foregroundStyle(.secondary)
+                                Text(kind == .deepSeek ? "请求 · 近30天" : "请求").foregroundStyle(.secondary)
                                 Spacer()
                                 Text(requests.formatted())
                                     .monospacedDigit()

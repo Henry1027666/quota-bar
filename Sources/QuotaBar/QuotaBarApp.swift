@@ -22,6 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 菜单栏图标：左键打开额度面板，右键弹出「退出」菜单（面板内不设退出按钮）。
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        // macOS 会把 status item 的可见性按宿主持久化；一旦被系统/用户隐藏过，isVisible 会
+        // 持续为 false 导致图标不出现。本应用全部 UI 就是这个图标，启动时强制置为可见。
+        item.isVisible = true
         if let button = item.button {
             button.image = NSImage(systemSymbolName: "chart.bar.xaxis", accessibilityDescription: "Quota Bar")
             button.target = self
@@ -61,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
-                guard let self else { return }
+                guard self != nil else { return }
                 let mb = Self.currentMemoryMB()
                 if mb > thresholdMB {
                     Log.append("MEM", "内存 \(mb)MB 超阈值，主线程栈：\n\(Thread.callStackSymbols.joined(separator: "\n"))")
