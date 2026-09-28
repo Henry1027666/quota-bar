@@ -27,9 +27,12 @@ if [[ ! -x "$BINARY" ]] || [[ -n "$(find Sources -name '*.swift' -newer "$BINARY
 fi
 
 # 2. 组装 .app bundle（Info.plist 见 Support/Info.plist，LSUIElement = 无 Dock 图标）
-mkdir -p "$APP_DIR/Contents/MacOS"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BINARY" "$APP_DIR/Contents/MacOS/QuotaBar"
 cp "$project_dir/Support/Info.plist" "$APP_DIR/Contents/Info.plist"
+cp "$project_dir/Support/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+# 刷新 mtime，促使 LaunchServices 更新图标缓存
+touch "$APP_DIR"
 
 # 3. 用稳定的自签名证书签名。
 #    不用 ad-hoc（codesign -s -）：adhoc 无固定身份，每次重建 macOS 都把 app 当成新应用，
@@ -74,4 +77,3 @@ pkill -9 -f "$project_dir/.build/release/QuotaBar" 2>/dev/null || true
 # 5. 启动
 open "$APP_DIR"
 echo "Quota Bar 已启动（$APP_DIR），图标应出现在右上角菜单栏。"
-echo "提示：如果图标未出现，请点击菜单栏右上角「控制中心」→ 底部「菜单栏」区域，把 QuotaBar 点亮。"

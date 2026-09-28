@@ -6,6 +6,8 @@
     <string>Quota Bar</string>
     <key>CFBundleExecutable</key>
     <string>QuotaBar</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.henryzhang.quotabar</string>
     <key>CFBundleInfoDictionaryVersion</key>
