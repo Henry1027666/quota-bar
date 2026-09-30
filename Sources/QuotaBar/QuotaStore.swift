@@ -49,6 +49,12 @@ final class QuotaStore: ObservableObject {
             }
             for await (kind, state) in group { states[kind] = state }
         }
+        // 落盘本轮快照供「近 7 天趋势」使用
+        for state in states.values {
+            if case .ready(let snapshot) = state {
+                UsageHistory.shared.record(snapshot)
+            }
+        }
         isRefreshing = false
         lastRefreshedAt = Date()
     }

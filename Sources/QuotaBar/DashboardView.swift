@@ -1,4 +1,5 @@
 import AppKit
+import Charts
 import SwiftUI
 
 /// 透明毛玻璃背景：behindWindow 混合模式让面板真正透出并模糊桌面，
@@ -210,6 +211,9 @@ private struct ProviderCard: View {
                 if let message = snapshot.message {
                     Text(message).font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
                 }
+                if let trendKey = UsageHistory.shared.displayKey(for: snapshot) {
+                    TrendView(kind: kind, seriesKey: trendKey, tint: kind.tint)
+                }
             }
         }
         .padding(.vertical, 10)
@@ -257,6 +261,59 @@ private struct ProviderCard: View {
             return "\(balance.amount.formatted(.number.precision(.fractionLength(0...2)))) credits"
         }
         return "\(balance.currency) \(balance.amount.formatted(.number.precision(.fractionLength(2))))"
+    }
+}
+
+/// 近 7 天用量趋势迷你图：折线 + 渐变面积，隐藏坐标轴。
+/// 窗口类序列固定 0~1 纵轴（用量占比）；余额类按数据自适应。
+private struct TrendView: View {
+    let kind: ProviderKind
+    let seriesKey: String
+    let tint: Color
+
+    private var isPercent: Bool { seriesKey.hasPrefix("window:") }
+
+    var body: some View {
+        let points = UsageHistory.shared.points(kind: kind, key: seriesKey)
+        if points.count >= 3 {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text("近 7 天趋势")
+                    Spacer()
+                    Text(isPercent ? "用量占比" : seriesKey.replacingOccurrences(of: "balance:", with: ""))
+                }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+
+                Chart {
+                    ForEach(points, id: \.ts) { point in
+                        LineMark(
+                            x: .value("时间", Date(timeIntervalSince1970: point.ts)),
+                            y: .value("值", point.value)
+                        )
+                        .foregroundStyle(tint)
+                        AreaMark(
+                            x: .value("时间", Date(timeIntervalSince1970: point.ts)),
+                            y: .value("值", point.value)
+                        )
+                        .foregroundStyle(tint.opacity(0.15))
+                    }
+                }
+                .chartXAxis(.hidden)
+                .chartYAxis(.hidden)
+                .chartYScale(domain: yDomain(for: points))
+                .frame(height: 36)
+            }
+        }
+    }
+
+    private func yDomain(for points: [UsageHistory.Point]) -> ClosedRange<Double> {
+        if isPercent { return 0...1 }
+        let values = points.map(\.value)
+        let lo = values.min() ?? 0
+        let hi = values.max() ?? 1
+        let pad = max((hi - lo) * 0.1, 1e-6)
+        return (lo - pad)...(hi + pad)
     }
 }
 
