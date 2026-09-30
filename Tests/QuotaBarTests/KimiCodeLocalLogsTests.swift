@@ -1,0 +1,45 @@
+import Foundation
+import Testing
+@testable import QuotaBar
+
+@Test func kimiCodeLocalLogsTotalsByDay() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("kimi-test-\(UUID().uuidString)")
+    let sessions = root.appendingPathComponent("sessions")
+    var cal = Calendar(identifier: .gregorian)
+    cal.firstWeekday = 2
+    let now = Date()
+    let dayStart = cal.startOfDay(for: now)
+    let weekStart = cal.dateInterval(of: .weekOfYear, for: now)!.start
+    let monthStart = cal.dateInterval(of: .month, for: now)!.start
+
+    // 按 sessions/wd_x/session_y/agents/<agent>/wire.jsonl 结构写 fixture，时间取当天本地正午
+    func write(tokens: Int, day: Date, agent: String, scope: String = "turn") throws {
+        let dir = sessions.appendingPathComponent("wd_test/session_\(agent)/agents/\(agent)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let ms = Int(day.addingTimeInterval(12 * 3600).timeIntervalSince1970 * 1000)
+        let line = """
+        {"type":"usage.record","agentId":"\(agent)","model":"kimi-code/k3","usage":{"inputOther":\(tokens - 100),"output":100,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"\(scope)","time":\(ms)}
+        """
+        try line.write(to: dir.appendingPathComponent("wire.jsonl"), atomically: true, encoding: .utf8)
+    }
+
+    // 今日：main 1000 + 子 agent 500（子 agent 用量在各自 wire.jsonl 中，必须计入）
+    try write(tokens: 1000, day: dayStart, agent: "main")
+    try write(tokens: 500, day: dayStart, agent: "agent-1")
+    // 昨日：仅 main
+    try write(tokens: 200, day: dayStart.addingTimeInterval(-86400), agent: "agent-2")
+    // 上月：不计入任何区间
+    try write(tokens: 9000, day: monthStart.addingTimeInterval(-86400), agent: "agent-3")
+    // session 级累计快照：必须排除，否则重复计数
+    try write(tokens: 99999, day: dayStart, agent: "agent-4", scope: "session")
+
+    let totals = KimiCodeLocalLogs.tokenTotals(sessionsRoot: sessions, now: now)
+    #expect(totals.today == 1500)
+    let yesterdayInWeek = dayStart.addingTimeInterval(-86400) >= weekStart
+    let yesterdayInMonth = dayStart.addingTimeInterval(-86400) >= monthStart
+    #expect(totals.week == (yesterdayInWeek ? 1700 : 1500))
+    #expect(totals.month == (yesterdayInMonth ? 1700 : 1500))
+
+    try FileManager.default.removeItem(at: root)
+}

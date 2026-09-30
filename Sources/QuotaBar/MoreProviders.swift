@@ -86,12 +86,12 @@ struct KimiProvider: QuotaProvider {
                 effectiveToken = refreshed
             }
             do {
-                return try await fetchSnapshot(token: effectiveToken, credentialURL: url)
+                return withLocalTokenStats(try await fetchSnapshot(token: effectiveToken, credentialURL: url))
             } catch QuotaError.http(401) {
                 // 401：刷新后再试一次
                 if let refreshed = await Self.refreshCredential(at: url) {
                     do {
-                        return try await fetchSnapshot(token: refreshed, credentialURL: url)
+                        return withLocalTokenStats(try await fetchSnapshot(token: refreshed, credentialURL: url))
                     } catch QuotaError.http(401) {
                         continue
                     }
@@ -108,6 +108,19 @@ struct KimiProvider: QuotaProvider {
     private static func isExpiring(_ credential: [String: Any]) -> Bool {
         guard let exp = Support.number(credential["expires_at"] ?? credential["expiresAt"]) else { return false }
         return exp - Date().timeIntervalSince1970 < 300
+    }
+
+    /// Kimi 接口不返回 token 计数：改从本地会话日志精确统计（今日/本周/本月）。
+    /// tokenUsage 展示今日值；tokenBreakdown 供趋势页三栏统计使用。
+    private func withLocalTokenStats(_ snapshot: ProviderSnapshot) -> ProviderSnapshot {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".kimi-code/sessions")
+        let totals = KimiCodeLocalLogs.tokenTotals(sessionsRoot: root)
+        guard totals.month > 0 else { return snapshot }
+        var result = snapshot
+        result.tokenUsage = totals.today
+        result.tokenBreakdown = TokenBreakdown(today: totals.today, week: totals.week, month: totals.month)
+        return result
     }
 
     /// 用 refresh_token 刷新 access_token 并原子写回凭据文件（保持 600 权限）；成功返回新 token。
