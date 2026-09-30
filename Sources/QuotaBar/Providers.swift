@@ -31,7 +31,7 @@ struct CodexProvider: QuotaProvider {
         }
 
         // Codex 接口不返回 token 计数：改从本地会话日志精确统计（今日/本周/本月 + 近 7 天逐日）。
-        // tokenUsage 展示今日值；tokenBreakdown 供趋势页三栏统计，dailyTokens 供趋势图使用。
+        // tokenUsage 展示今日值；tokenBreakdown 供顶部三栏统计，dailyTokens 供卡片迷你趋势图使用。
         let sessions = home.appendingPathComponent("sessions")
         let totals = CodexLocalLogs.tokenTotals(sessionsRoot: sessions)
         let daily = CodexLocalLogs.dailyTokens(sessionsRoot: sessions, days: 7)
@@ -86,87 +86,5 @@ struct CodexProvider: QuotaProvider {
             balances: [MoneyBalance(label: "余额", amount: max(total - used, 0), currency: "USD")],
             tokenUsage: nil, requestCount: nil, updatedAt: Date(), message: nil
         )
-    }
-}
-
-struct CursorProvider: QuotaProvider {
-    let kind = ProviderKind.cursor
-
-    func fetch() async throws -> ProviderSnapshot {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "\(home)/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
-            "\(home)/Library/Application Support/Cursor - Insiders/User/globalStorage/state.vscdb",
-            "\(home)/Library/Application Support/Cursor Nightly/User/globalStorage/state.vscdb"
-        ]
-        guard let database = candidates.first(where: FileManager.default.fileExists(atPath:)) else {
-            throw QuotaError.notAuthenticated("未检测到 Cursor")
-        }
-        let keys = "'cursorAuth/accessToken','cursorAuth/cachedEmail','cursorAuth/stripeMembershipType'"
-        let query = "SELECT key, value FROM ItemTable WHERE key IN (\(keys));"
-        let output = try Support.run("/usr/bin/sqlite3", ["-readonly", "-batch", "-noheader", "-separator", "\t", database, query])
-        var values: [String: String] = [:]
-        for line in output.split(whereSeparator: \.isNewline) {
-            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2 else { continue }
-            let raw = String(parts[1])
-            let decoded = (try? JSONDecoder().decode(String.self, from: Data(raw.utf8))) ?? raw
-            values[String(parts[0])] = decoded
-        }
-        guard let token = values["cursorAuth/accessToken"], !token.isEmpty else {
-            throw QuotaError.notAuthenticated("Cursor 尚未登录")
-        }
-
-        async let summary = try? Support.jsonRequest(
-            URL(string: "https://cursor.com/api/usage-summary")!,
-            headers: ["Cookie": "WorkosCursorSessionToken=\(sessionToken(token))"]
-        )
-        async let current = try? Support.jsonRequest(
-            URL(string: "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")!,
-            method: "POST", bearer: token,
-            headers: ["Connect-Protocol-Version": "1"], body: Data("{}".utf8)
-        )
-        let payloads = await [summary, current].compactMap { $0 }
-        var windows = payloads.flatMap { Support.parseGenericWindows($0) }
-        var seen = Set<String>()
-        windows = windows.filter { seen.insert("\($0.title)-\($0.limit)-\($0.used)-\($0.resetAt?.timeIntervalSince1970 ?? 0)").inserted }
-        let root = payloads.first as? [String: Any]
-        let account = values["cursorAuth/cachedEmail"] ?? root.flatMap { Support.firstString(in: $0, keys: ["email"]) }
-        let requests = payloads.lazy.compactMap(extractRequestCount).first
-        let tokens = payloads.lazy.compactMap(extractTokenCount).first
-        return ProviderSnapshot(
-            kind: kind,
-            plan: values["cursorAuth/stripeMembershipType"] ?? root.flatMap { Support.firstString(in: $0, keys: ["membershipType", "planName"]) },
-            account: account,
-            windows: windows,
-            balances: [],
-            tokenUsage: tokens,
-            requestCount: requests,
-            updatedAt: Date(),
-            message: payloads.isEmpty ? "已登录，暂时无法读取额度" : nil
-        )
-    }
-
-    private func sessionToken(_ token: String) -> String {
-        if token.contains("%3A%3A") { return token }
-        return token.replacingOccurrences(of: "::", with: "%3A%3A")
-    }
-
-    private func extractRequestCount(_ payload: Any) -> Int? {
-        recursiveNumber(payload, keys: ["numRequests", "num_requests", "totalRequests", "requestCount"]).map(Int.init)
-    }
-
-    private func extractTokenCount(_ payload: Any) -> Int? {
-        recursiveNumber(payload, keys: ["totalTokens", "total_tokens", "tokenUsage", "tokens"]).map(Int.init)
-    }
-
-    private func recursiveNumber(_ value: Any, keys: Set<String>) -> Double? {
-        if let dictionary = value as? [String: Any] {
-            for key in keys { if let number = Support.number(dictionary[key]) { return number } }
-            for child in dictionary.values { if let number = recursiveNumber(child, keys: keys) { return number } }
-        } else if let array = value as? [Any] {
-            for child in array { if let number = recursiveNumber(child, keys: keys) { return number } }
-        }
-        return nil
     }
 }

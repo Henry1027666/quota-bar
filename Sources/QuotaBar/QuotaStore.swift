@@ -13,7 +13,7 @@ final class QuotaStore: ObservableObject {
     private(set) var lastRefreshedAt: Date?
 
     private let providers: [any QuotaProvider] = [
-        CodexProvider(), CursorProvider(), ClaudeProvider(), KimiProvider(), DeepSeekProvider()
+        CodexProvider(), ClaudeProvider(), KimiProvider(), DeepSeekProvider()
     ]
 
     init() {

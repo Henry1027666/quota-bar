@@ -4,10 +4,9 @@
 
 当前支持：
 
-* Codex：5 小时 / 周额度、重置时间、Credits/API 余额
-* Cursor：套餐额度，以及接口实际返回的 token / 请求数
+* Codex：5 小时 / 周额度、重置时间、Credits/API 余额；token 用量由本地会话日志精确统计（今日/本周/本月 + 近 7 天逐日趋势）
 * Claude Code：5 小时 / 周额度与重置时间
-* Kimi Code：同时发现 `~/.kimi-code`（VS Code 扩展 / 新版客户端）和 `~/.kimi`（旧版 CLI），展示 5 小时 / 周 / 月额度、Extra Usage，以及接口实际返回的 token / 请求数
+* Kimi Code：同时发现 `~/.kimi-code`（VS Code 扩展 / 新版客户端）和 `~/.kimi`（旧版 CLI），展示 5 小时 / 周 / 月额度、Extra Usage；token 用量同样由本地会话日志精确统计
 * DeepSeek：同时发现环境变量、DeepSeek Harness 的 `~/.dsh/.credentials.yaml` 与常见客户端配置，展示 API 余额
 
 未检测到认证的厂商不会出现在面板中。

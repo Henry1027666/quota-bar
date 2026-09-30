@@ -2,14 +2,13 @@ import Foundation
 import SwiftUI
 
 enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
-    case codex, cursor, claude, kimi, deepSeek
+    case codex, claude, kimi, deepSeek
 
     var id: String { rawValue }
 
     var name: String {
         switch self {
         case .codex: "Codex"
-        case .cursor: "Cursor"
         case .claude: "Claude Code"
         case .kimi: "Kimi Code"
         case .deepSeek: "DeepSeek"
@@ -19,7 +18,6 @@ enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
     var symbol: String {
         switch self {
         case .codex: "apple.intelligence"
-        case .cursor: "cursorarrow.rays"
         case .claude: "sparkles"
         case .kimi: "moon.stars.fill"
         case .deepSeek: "wave.3.right"
@@ -29,7 +27,6 @@ enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
     var tint: Color {
         switch self {
         case .codex: .blue
-        case .cursor: .indigo
         case .claude: .orange
         case .kimi: .green
         case .deepSeek: .cyan
@@ -40,7 +37,6 @@ enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
     var website: URL? {
         switch self {
         case .codex: URL(string: "https://chatgpt.com/usage")
-        case .cursor: URL(string: "https://cursor.com/dashboard/spending")
         case .claude: URL(string: "https://claude.ai/settings/usage")
         case .kimi: URL(string: "https://www.kimi.com/settings/subscription?tab=quota&from=kfc_console_upgrade")
         case .deepSeek: URL(string: "https://platform.deepseek.com/usage")

@@ -28,8 +28,9 @@ private struct VisualEffectBackground: NSViewRepresentable {
     }
 }
 
-/// 单页面板：顶部综合用量（三栏统计 + 近 7 天多厂商曲线图 + 各厂商今日用量图例），
-/// 下方为圆角厂商卡片列表。
+/// 单页面板：顶部为今日/本周/本月 token 总用量，下方为圆角厂商卡片；
+/// 每张卡片底部内嵌近 7 天逐日用量迷你曲线（有本地日志的厂商为精确值，
+/// 其余为采样增量估算）。
 struct DashboardView: View {
     @ObservedObject var store: QuotaStore
     @State private var refreshHovered = false
@@ -37,7 +38,7 @@ struct DashboardView: View {
     var onContentHeightChange: ((CGFloat) -> Void)?
 
     /// 卡片列表区（ScrollView）最大高度：条目再多也不超过此高度，超出滚动。
-    static let maxContentHeight: CGFloat = 480
+    static let maxContentHeight: CGFloat = 560
 
     /// 可见厂商按「token plan → API → free」排序，free 统一排最下方；同档保持稳定顺序。
     fileprivate var sortedKinds: [ProviderKind] {
@@ -51,53 +52,6 @@ struct DashboardView: View {
             if lt != rt { return lt < rt }
             return lhs.rawValue < rhs.rawValue
         }
-    }
-
-    /// 按主列表同样的排序取已就绪的快照（供综合趋势图）。
-    private var readySnapshots: [ProviderSnapshot] {
-        sortedKinds.compactMap { kind in
-            guard case .ready(let snapshot) = store.states[kind] else { return nil }
-            return snapshot
-        }
-    }
-
-    /// 参与综合趋势图的厂商序列：有本地日志的用逐日精确值（Codex / Kimi Code），
-    /// 其余有 token 计数器的用采样按日增量估算；完全没有 token 数据的不参与。
-    private var trends: [ProviderTrend] {
-        readySnapshots.compactMap { snapshot in
-            if let daily = snapshot.dailyTokens {
-                return ProviderTrend(kind: snapshot.kind, days: daily)
-            }
-            guard snapshot.tokenUsage != nil else { return nil }
-            let days = UsageHistory.shared.dailyDeltas(kind: snapshot.kind, key: "tokens", days: 7)
-            return days.contains(where: { $0.tokens > 0 }) ? ProviderTrend(kind: snapshot.kind, days: days) : nil
-        }
-    }
-
-    /// 各厂商 Token 计数器在今日/本周/本月内的增量之和；无任何厂商返回 token 用量时为 nil。
-    /// 本周以周一为起点（国内习惯）。有精确分解（本地日志）的厂商用精确值，其余用采样增量估算。
-    private var tokenDeltas: (today: Int, week: Int, month: Int)? {
-        let now = Date()
-        var cal = Calendar(identifier: .gregorian)
-        cal.firstWeekday = 2
-        let dayStart = cal.startOfDay(for: now)
-        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
-        let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
-        var today = 0, week = 0, month = 0, found = false
-        for snapshot in readySnapshots {
-            if let breakdown = snapshot.tokenBreakdown {
-                found = true
-                today += breakdown.today
-                week += breakdown.week
-                month += breakdown.month
-            } else if snapshot.tokenUsage != nil {
-                found = true
-                today += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: dayStart, now: now) ?? 0)
-                week += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: weekStart, now: now) ?? 0)
-                month += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: monthStart, now: now) ?? 0)
-            }
-        }
-        return found ? (today, week, month) : nil
     }
 
     var body: some View {
@@ -137,28 +91,47 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - 顶部综合用量区
+    // MARK: - 顶部总用量
+
+    /// 各厂商 Token 计数器在今日/本周/本月内的增量之和；无任何厂商返回 token 用量时为 nil。
+    /// 本周以周一为起点（国内习惯）。有精确分解（本地日志）的厂商用精确值，其余用采样增量估算。
+    private var tokenDeltas: (today: Int, week: Int, month: Int)? {
+        let now = Date()
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2
+        let dayStart = cal.startOfDay(for: now)
+        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
+        let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
+        var today = 0, week = 0, month = 0, found = false
+        for kind in sortedKinds {
+            guard case .ready(let snapshot) = store.states[kind] else { continue }
+            if let breakdown = snapshot.tokenBreakdown {
+                found = true
+                today += breakdown.today
+                week += breakdown.week
+                month += breakdown.month
+            } else if snapshot.tokenUsage != nil {
+                found = true
+                today += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: dayStart, now: now) ?? 0)
+                week += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: weekStart, now: now) ?? 0)
+                month += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: monthStart, now: now) ?? 0)
+            }
+        }
+        return found ? (today, week, month) : nil
+    }
 
     @ViewBuilder
     private var summarySection: some View {
-        let deltas = tokenDeltas
-        let trends = trends
-        if deltas != nil || !trends.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                if let deltas {
-                    HStack(spacing: 0) {
-                        tokenStat(title: "今日用量", value: deltas.today)
-                        tokenStat(title: "本周用量", value: deltas.week)
-                        tokenStat(title: "本月用量", value: deltas.month)
-                    }
+        if let deltas = tokenDeltas {
+            VStack(spacing: 6) {
+                HStack(spacing: 0) {
+                    tokenStat(title: "今日用量", value: deltas.today)
+                    tokenStat(title: "本周用量", value: deltas.week)
+                    tokenStat(title: "本月用量", value: deltas.month)
                 }
-                if !trends.isEmpty {
-                    combinedChart(trends: trends)
-                    legend(trends: trends)
-                    Text("Codex / Kimi Code 为本地日志精确统计，其余为采样增量估算")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
+                Text("Codex / Kimi Code 为本地日志精确统计，其余为采样增量估算")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
             .padding(.bottom, 6)
 
@@ -176,56 +149,6 @@ struct DashboardView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
-    }
-
-    /// 近 7 天综合用量曲线：每家厂商一条彩色线，右端（今日）带端点圆点；
-    /// 横轴只标注周几，纵轴隐藏。
-    private func combinedChart(trends: [ProviderTrend]) -> some View {
-        Chart {
-            ForEach(trends) { trend in
-                ForEach(trend.days, id: \.day) { item in
-                    LineMark(
-                        x: .value("日期", item.day),
-                        y: .value("Tokens", item.tokens)
-                    )
-                    .foregroundStyle(trend.kind.tint)
-                    .interpolationMethod(.catmullRom)
-                    .lineStyle(StrokeStyle(lineWidth: 1.5))
-                }
-                if let last = trend.days.last, last.tokens > 0 {
-                    PointMark(
-                        x: .value("日期", last.day),
-                        y: .value("Tokens", last.tokens)
-                    )
-                    .foregroundStyle(trend.kind.tint)
-                    .symbolSize(24)
-                }
-            }
-        }
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .day)) { _ in
-                AxisValueLabel(format: .dateTime.weekday(.narrow), centered: true)
-            }
-        }
-        .chartYAxis(.hidden)
-        .frame(height: 90)
-    }
-
-    /// 图例 = 各厂商今日用量（色点 + 名称 + 数值）。
-    private func legend(trends: [ProviderTrend]) -> some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), alignment: .leading)],
-                  alignment: .leading, spacing: 4) {
-            ForEach(trends) { trend in
-                HStack(spacing: 4) {
-                    Circle().fill(trend.kind.tint).frame(width: 6, height: 6)
-                    Text(trend.kind.name)
-                    Text(trend.days.last?.tokens.formatted(.number.notation(.compactName)) ?? "0")
-                        .monospacedDigit()
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-        }
     }
 
     private var footer: some View {
@@ -252,18 +175,22 @@ struct DashboardView: View {
     }
 }
 
-/// 一个厂商的近 7 天逐日 token 序列（综合趋势图用）。
-private struct ProviderTrend: Identifiable {
-    let kind: ProviderKind
-    let days: [DailyTokenUsage]
-
-    var id: ProviderKind { kind }
-}
-
 private struct ProviderCard: View {
     let kind: ProviderKind
     let state: ProviderState
     @State private var nameHovered = false
+
+    /// 卡片迷你趋势的近 7 天逐日序列：本地日志精确值优先，采样增量估算兜底；
+    /// 7 天全为 0 时不展示。
+    private var trendDays: [DailyTokenUsage]? {
+        guard case .ready(let snapshot) = state else { return nil }
+        if let daily = snapshot.dailyTokens {
+            return daily.contains(where: { $0.tokens > 0 }) ? daily : nil
+        }
+        guard snapshot.tokenUsage != nil else { return nil }
+        let days = UsageHistory.shared.dailyDeltas(kind: snapshot.kind, key: "tokens", days: 7)
+        return days.contains(where: { $0.tokens > 0 }) ? days : nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -343,6 +270,9 @@ private struct ProviderCard: View {
                     }
                     .font(.caption)
                 }
+                if let days = trendDays {
+                    MiniTrend(days: days, tint: kind.tint)
+                }
                 if kind == .deepSeek, snapshot.tokenUsage == nil, snapshot.requestCount == nil {
                     Button {
                         DeepSeekWebSession.shared.showLoginWindow()
@@ -406,6 +336,33 @@ private struct ProviderCard: View {
             return "\(balance.amount.formatted(.number.precision(.fractionLength(0...2)))) credits"
         }
         return "\(balance.currency) \(balance.amount.formatted(.number.precision(.fractionLength(2))))"
+    }
+}
+
+/// 卡片底部的近 7 天逐日用量迷你趋势：平滑曲线 + 浅渐变面积，无坐标轴，右端为今天。
+private struct MiniTrend: View {
+    let days: [DailyTokenUsage]
+    let tint: Color
+
+    var body: some View {
+        Chart(days, id: \.day) { item in
+            LineMark(
+                x: .value("日期", item.day),
+                y: .value("Tokens", item.tokens)
+            )
+            .foregroundStyle(tint)
+            .interpolationMethod(.catmullRom)
+            .lineStyle(StrokeStyle(lineWidth: 1.5))
+            AreaMark(
+                x: .value("日期", item.day),
+                y: .value("Tokens", item.tokens)
+            )
+            .foregroundStyle(tint.opacity(0.12))
+            .interpolationMethod(.catmullRom)
+        }
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        .frame(height: 26)
     }
 }
 
