@@ -85,6 +85,40 @@ final class UsageHistory {
         return max(latest.value - baseline.value, 0)
     }
 
+    /// 累计型序列（tokens）按本地自然日拆分最近 days 天的逐日增量（采样估算）。
+    /// 某日增量 = 相邻采样点的差值（归属较晚点所在日），计数器重置的负增量钳制为 0；
+    /// 无采样覆盖的日期为 0。供没有本地日志的厂商参与综合趋势图。
+    func dailyDeltas(kind: ProviderKind, key: String, days: Int, now: Date = Date()) -> [DailyTokenUsage] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2
+        let dayStart = cal.startOfDay(for: now)
+        guard let firstDay = cal.date(byAdding: .day, value: -(days - 1), to: dayStart) else { return [] }
+        let firstTs = firstDay.timeIntervalSince1970
+
+        var perDay: [String: Double] = [:]
+        var prev: Point?
+        for point in series[kind.rawValue]?[key] ?? [] {
+            if let prev, point.ts >= firstTs {
+                let delta = max(point.value - prev.value, 0)
+                if delta > 0 {
+                    let day = Self.dayFormatter.string(from: Date(timeIntervalSince1970: point.ts))
+                    perDay[day, default: 0] += delta
+                }
+            }
+            prev = point
+        }
+        return (0..<days).compactMap { offset in
+            guard let day = cal.date(byAdding: .day, value: offset, to: firstDay) else { return nil }
+            return DailyTokenUsage(day: day, tokens: Int(perDay[Self.dayFormatter.string(from: day)] ?? 0))
+        }
+    }
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
     /// 厂商卡片趋势图跟踪的序列：优先周限额窗口，其次第一个窗口，再退化到第一条余额。
     func displayKey(for snapshot: ProviderSnapshot) -> String? {
         if snapshot.windows.contains(where: { $0.title == "周限额" }) { return "window:周限额" }

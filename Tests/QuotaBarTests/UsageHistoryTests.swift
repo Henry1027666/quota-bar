@@ -117,3 +117,27 @@ private func snapshot(
     history.record(snap(100), at: now.addingTimeInterval(600))
     #expect(history.delta(kind: .kimi, key: "tokens", since: dayStart, now: now) == 0)
 }
+
+@MainActor
+@Test func historyDailyDeltasBucketByDay() {
+    let (history, _) = makeHistory()
+    let dayStart = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_780_000_000))
+    let now = dayStart.addingTimeInterval(12 * 3600) // 当天中午
+    func snap(_ tokens: Int) -> ProviderSnapshot {
+        ProviderSnapshot(
+            kind: .kimi, plan: nil, account: nil, windows: [], balances: [],
+            tokenUsage: tokens, requestCount: nil, updatedAt: now, message: nil
+        )
+    }
+    // 前天 1000 → 昨天 1300（+300 归昨天）→ 今天凌晨 1500（+200 归今天）→ 现在 2600（+1100 归今天）
+    history.record(snap(1000), at: dayStart.addingTimeInterval(-2 * 86400))
+    history.record(snap(1300), at: dayStart.addingTimeInterval(-86400))
+    history.record(snap(1500), at: dayStart.addingTimeInterval(3600))
+    history.record(snap(2600), at: now)
+
+    let daily = history.dailyDeltas(kind: .kimi, key: "tokens", days: 7, now: now)
+    #expect(daily.count == 7)
+    #expect(daily.last?.tokens == 1300)            // 今天：200 + 1100
+    #expect(daily[daily.count - 2].tokens == 300)  // 昨天
+    #expect(daily.reduce(0) { $0 + $1.tokens } == 1600)
+}

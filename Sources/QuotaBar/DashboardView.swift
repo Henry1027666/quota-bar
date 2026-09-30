@@ -28,16 +28,16 @@ private struct VisualEffectBackground: NSViewRepresentable {
     }
 }
 
+/// 单页面板：顶部综合用量（三栏统计 + 近 7 天多厂商曲线图 + 各厂商今日用量图例），
+/// 下方为圆角厂商卡片列表。
 struct DashboardView: View {
     @ObservedObject var store: QuotaStore
     @State private var refreshHovered = false
-    @State private var trendHovered = false
-    @State private var showingTrends = false
     /// 内容高度变化回调：AppDelegate 据此更新 popover 尺寸，实现窗口随条目自适应。
     var onContentHeightChange: ((CGFloat) -> Void)?
 
-    /// 内容区（ScrollView）最大高度：条目再多也不超过此高度，超出滚动。
-    static let maxContentHeight: CGFloat = 560
+    /// 卡片列表区（ScrollView）最大高度：条目再多也不超过此高度，超出滚动。
+    static let maxContentHeight: CGFloat = 480
 
     /// 可见厂商按「token plan → API → free」排序，free 统一排最下方；同档保持稳定顺序。
     fileprivate var sortedKinds: [ProviderKind] {
@@ -53,13 +53,70 @@ struct DashboardView: View {
         }
     }
 
-    var body: some View {
-        ZStack {
-            if showingTrends {
-                TrendsPage(store: store, onBack: { showingTrends = false })
-            } else {
-                mainContent
+    /// 按主列表同样的排序取已就绪的快照（供综合趋势图）。
+    private var readySnapshots: [ProviderSnapshot] {
+        sortedKinds.compactMap { kind in
+            guard case .ready(let snapshot) = store.states[kind] else { return nil }
+            return snapshot
+        }
+    }
+
+    /// 参与综合趋势图的厂商序列：有本地日志的用逐日精确值（Codex / Kimi Code），
+    /// 其余有 token 计数器的用采样按日增量估算；完全没有 token 数据的不参与。
+    private var trends: [ProviderTrend] {
+        readySnapshots.compactMap { snapshot in
+            if let daily = snapshot.dailyTokens {
+                return ProviderTrend(kind: snapshot.kind, days: daily)
             }
+            guard snapshot.tokenUsage != nil else { return nil }
+            let days = UsageHistory.shared.dailyDeltas(kind: snapshot.kind, key: "tokens", days: 7)
+            return days.contains(where: { $0.tokens > 0 }) ? ProviderTrend(kind: snapshot.kind, days: days) : nil
+        }
+    }
+
+    /// 各厂商 Token 计数器在今日/本周/本月内的增量之和；无任何厂商返回 token 用量时为 nil。
+    /// 本周以周一为起点（国内习惯）。有精确分解（本地日志）的厂商用精确值，其余用采样增量估算。
+    private var tokenDeltas: (today: Int, week: Int, month: Int)? {
+        let now = Date()
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2
+        let dayStart = cal.startOfDay(for: now)
+        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
+        let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
+        var today = 0, week = 0, month = 0, found = false
+        for snapshot in readySnapshots {
+            if let breakdown = snapshot.tokenBreakdown {
+                found = true
+                today += breakdown.today
+                week += breakdown.week
+                month += breakdown.month
+            } else if snapshot.tokenUsage != nil {
+                found = true
+                today += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: dayStart, now: now) ?? 0)
+                week += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: weekStart, now: now) ?? 0)
+                month += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: monthStart, now: now) ?? 0)
+            }
+        }
+        return found ? (today, week, month) : nil
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            summarySection
+
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(sortedKinds) { kind in
+                        ProviderCard(kind: kind, state: store.states[kind] ?? .loading)
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+            .scrollIndicators(.hidden)
+            .frame(maxHeight: Self.maxContentHeight)
+
+            Divider().opacity(0.35)
+            footer
         }
         .padding(14)
         .frame(width: 350)
@@ -80,40 +137,94 @@ struct DashboardView: View {
         }
     }
 
-    private var mainContent: some View {
-        VStack(spacing: 0) {
-            // 顶栏：右侧综合趋势入口
-            HStack {
-                Spacer()
-                Button { showingTrends = true } label: {
-                    Image(systemName: "chart.line.uptrend.xyaxis")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(trendHovered ? .primary : .secondary)
-                        .contentShape(Rectangle())
+    // MARK: - 顶部综合用量区
+
+    @ViewBuilder
+    private var summarySection: some View {
+        let deltas = tokenDeltas
+        let trends = trends
+        if deltas != nil || !trends.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                if let deltas {
+                    HStack(spacing: 0) {
+                        tokenStat(title: "今日用量", value: deltas.today)
+                        tokenStat(title: "本周用量", value: deltas.week)
+                        tokenStat(title: "本月用量", value: deltas.month)
+                    }
                 }
-                .buttonStyle(.plain)
-                .onHover { trendHovered = $0 }
-                .help("综合趋势")
+                if !trends.isEmpty {
+                    combinedChart(trends: trends)
+                    legend(trends: trends)
+                    Text("Codex / Kimi Code 为本地日志精确统计，其余为采样增量估算")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
             .padding(.bottom, 6)
 
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(sortedKinds.enumerated()), id: \.element) { index, kind in
-                        ProviderCard(kind: kind, state: store.states[kind] ?? .loading)
-                        if index < sortedKinds.count - 1 {
-                            Divider().opacity(0.35)
-                                .padding(.horizontal, 2)
-                        }
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-            .scrollIndicators(.hidden)
-            .frame(maxHeight: Self.maxContentHeight)
-
             Divider().opacity(0.35)
-            footer
+        }
+    }
+
+    private func tokenStat(title: String, value: Int) -> some View {
+        VStack(spacing: 2) {
+            Text(value.formatted(.number.notation(.compactName)))
+                .font(.system(size: 15, weight: .semibold))
+                .monospacedDigit()
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// 近 7 天综合用量曲线：每家厂商一条彩色线，右端（今日）带端点圆点；
+    /// 横轴只标注周几，纵轴隐藏。
+    private func combinedChart(trends: [ProviderTrend]) -> some View {
+        Chart {
+            ForEach(trends) { trend in
+                ForEach(trend.days, id: \.day) { item in
+                    LineMark(
+                        x: .value("日期", item.day),
+                        y: .value("Tokens", item.tokens)
+                    )
+                    .foregroundStyle(trend.kind.tint)
+                    .interpolationMethod(.catmullRom)
+                    .lineStyle(StrokeStyle(lineWidth: 1.5))
+                }
+                if let last = trend.days.last, last.tokens > 0 {
+                    PointMark(
+                        x: .value("日期", last.day),
+                        y: .value("Tokens", last.tokens)
+                    )
+                    .foregroundStyle(trend.kind.tint)
+                    .symbolSize(24)
+                }
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .day)) { _ in
+                AxisValueLabel(format: .dateTime.weekday(.narrow), centered: true)
+            }
+        }
+        .chartYAxis(.hidden)
+        .frame(height: 90)
+    }
+
+    /// 图例 = 各厂商今日用量（色点 + 名称 + 数值）。
+    private func legend(trends: [ProviderTrend]) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), alignment: .leading)],
+                  alignment: .leading, spacing: 4) {
+            ForEach(trends) { trend in
+                HStack(spacing: 4) {
+                    Circle().fill(trend.kind.tint).frame(width: 6, height: 6)
+                    Text(trend.kind.name)
+                    Text(trend.days.last?.tokens.formatted(.number.notation(.compactName)) ?? "0")
+                        .monospacedDigit()
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -139,6 +250,14 @@ struct DashboardView: View {
         }
         .padding(.top, 10)
     }
+}
+
+/// 一个厂商的近 7 天逐日 token 序列（综合趋势图用）。
+private struct ProviderTrend: Identifiable {
+    let kind: ProviderKind
+    let days: [DailyTokenUsage]
+
+    var id: ProviderKind { kind }
 }
 
 private struct ProviderCard: View {
@@ -204,8 +323,8 @@ private struct ProviderCard: View {
                     VStack(spacing: 4) {
                         if let tokens = snapshot.tokenUsage {
                             HStack {
-                                // DeepSeek 的用量接口按近 30 天汇总，其余厂商为当前周期口径
-                                Text(kind == .deepSeek ? "Tokens · 近30天" : "Tokens").foregroundStyle(.secondary)
+                                // DeepSeek 的用量接口按近 30 天汇总，其余厂商为今日口径
+                                Text(kind == .deepSeek ? "Tokens · 近30天" : "Tokens · 今日").foregroundStyle(.secondary)
                                 Spacer()
                                 Text(tokens.formatted(.number.notation(.compactName)))
                                     .monospacedDigit()
@@ -240,7 +359,9 @@ private struct ProviderCard: View {
                 }
             }
         }
+        .padding(.horizontal, 10)
         .padding(.vertical, 10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     @ViewBuilder
@@ -285,228 +406,6 @@ private struct ProviderCard: View {
             return "\(balance.amount.formatted(.number.precision(.fractionLength(0...2)))) credits"
         }
         return "\(balance.currency) \(balance.amount.formatted(.number.precision(.fractionLength(2))))"
-    }
-}
-
-/// 综合趋势页：左上角返回，逐厂商展示近 7 天趋势；无采样时展示占位而非隐藏。
-private struct TrendsPage: View {
-    @ObservedObject var store: QuotaStore
-    let onBack: () -> Void
-    @State private var backHovered = false
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Button(action: onBack) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(backHovered ? .primary : .secondary)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .onHover { backHovered = $0 }
-                .help("返回")
-                Text("综合趋势")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-            }
-            .padding(.bottom, 8)
-
-            Divider().opacity(0.35)
-
-            if let deltas = tokenDeltas {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 0) {
-                        tokenStat(title: "今日用量", value: deltas.today)
-                        tokenStat(title: "本周用量", value: deltas.week)
-                        tokenStat(title: "本月用量", value: deltas.month)
-                    }
-                    Text("Codex / Kimi Code 为本地日志精确统计，其余为采样增量估算")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.vertical, 8)
-
-                Divider().opacity(0.35)
-            }
-
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(readySnapshots, id: \.kind) { snapshot in
-                        trendSection(for: snapshot)
-                        if snapshot.kind != readySnapshots.last?.kind {
-                            Divider().opacity(0.35).padding(.horizontal, 2)
-                        }
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-            .scrollIndicators(.hidden)
-            .frame(maxHeight: DashboardView.maxContentHeight)
-        }
-    }
-
-    /// 按主面板同样的排序展示已就绪的厂商。
-    private var readySnapshots: [ProviderSnapshot] {
-        let kinds = ProviderKind.allCases.filter {
-            if case .notDetected = store.states[$0] { return false }
-            return true
-        }.sorted { lhs, rhs in
-            let lt = store.states[lhs]?.tier ?? .free
-            let rt = store.states[rhs]?.tier ?? .free
-            return lt != rt ? lt < rt : lhs.rawValue < rhs.rawValue
-        }
-        return kinds.compactMap { kind in
-            guard case .ready(let snapshot) = store.states[kind] else { return nil }
-            return snapshot
-        }
-    }
-
-    /// 各厂商 Token 计数器在今日/本周/本月内的增量之和；无任何厂商返回 token 用量时为 nil。
-    /// 本周以周一为起点（国内习惯）。有精确分解（如 Codex 本地日志）的厂商用精确值，
-    /// 其余用采样增量估算。
-    private var tokenDeltas: (today: Int, week: Int, month: Int)? {
-        let now = Date()
-        var cal = Calendar(identifier: .gregorian)
-        cal.firstWeekday = 2
-        let dayStart = cal.startOfDay(for: now)
-        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
-        let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
-        var today = 0, week = 0, month = 0, found = false
-        for snapshot in readySnapshots {
-            if let breakdown = snapshot.tokenBreakdown {
-                found = true
-                today += breakdown.today
-                week += breakdown.week
-                month += breakdown.month
-            } else if snapshot.tokenUsage != nil {
-                found = true
-                today += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: dayStart, now: now) ?? 0)
-                week += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: weekStart, now: now) ?? 0)
-                month += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: monthStart, now: now) ?? 0)
-            }
-        }
-        return found ? (today, week, month) : nil
-    }
-
-    private func tokenStat(title: String, value: Int) -> some View {
-        VStack(spacing: 2) {
-            Text(value.formatted(.number.notation(.compactName)))
-                .font(.system(size: 15, weight: .semibold))
-                .monospacedDigit()
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder
-    private func trendSection(for snapshot: ProviderSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Image(systemName: snapshot.kind.symbol)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(snapshot.kind.tint)
-                    .frame(width: 18, height: 18)
-                    .background(snapshot.kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-                Text(snapshot.kind.name).font(.caption).fontWeight(.medium)
-                Spacer()
-                Text("近 7 天").font(.caption2).foregroundStyle(.tertiary)
-            }
-            if let daily = snapshot.dailyTokens {
-                DailyTokenChart(days: daily, tint: snapshot.kind.tint)
-            } else if let key = UsageHistory.shared.displayKey(for: snapshot) {
-                TrendChart(
-                    points: UsageHistory.shared.points(kind: snapshot.kind, key: key),
-                    tint: snapshot.kind.tint,
-                    isPercent: key.hasPrefix("window:"),
-                    emptyText: "暂无足够采样数据，使用中会每 5 分钟自动积累"
-                )
-            } else {
-                Text("该厂商没有可跟踪的额度序列")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, minHeight: 48)
-            }
-        }
-        .padding(.vertical, 8)
-    }
-}
-
-/// 近 7 天用量趋势图：折线 + 渐变面积，隐藏坐标轴；数据不足时显示占位文字。
-/// 窗口类序列固定 0~1 纵轴（用量占比）；余额类按数据自适应。
-private struct TrendChart: View {
-    let points: [UsageHistory.Point]
-    let tint: Color
-    let isPercent: Bool
-    let emptyText: String
-
-    var body: some View {
-        if points.count >= 3 {
-            Chart {
-                ForEach(points, id: \.ts) { point in
-                    LineMark(
-                        x: .value("时间", Date(timeIntervalSince1970: point.ts)),
-                        y: .value("值", point.value)
-                    )
-                    .foregroundStyle(tint)
-                    AreaMark(
-                        x: .value("时间", Date(timeIntervalSince1970: point.ts)),
-                        y: .value("值", point.value)
-                    )
-                    .foregroundStyle(tint.opacity(0.15))
-                }
-            }
-            .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
-            .chartYScale(domain: yDomain)
-            .frame(height: 56)
-        } else {
-            Text(emptyText)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .frame(maxWidth: .infinity, minHeight: 56)
-        }
-    }
-
-    private var yDomain: ClosedRange<Double> {
-        if isPercent { return 0...1 }
-        let values = points.map(\.value)
-        let lo = values.min() ?? 0
-        let hi = values.max() ?? 1
-        let pad = max((hi - lo) * 0.1, 1e-6)
-        return (lo - pad)...(hi + pad)
-    }
-}
-
-/// 近 7 天逐日 token 用量柱状图（本地日志精确统计）；隐藏纵轴，横轴只标注周几。
-private struct DailyTokenChart: View {
-    let days: [DailyTokenUsage]
-    let tint: Color
-
-    var body: some View {
-        if days.contains(where: { $0.tokens > 0 }) {
-            Chart(days, id: \.day) { item in
-                BarMark(
-                    x: .value("日期", item.day, unit: .day),
-                    y: .value("Tokens", item.tokens)
-                )
-                .foregroundStyle(tint.opacity(0.85))
-                .cornerRadius(2)
-            }
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .day)) { _ in
-                    AxisValueLabel(format: .dateTime.weekday(.abbreviated), centered: true)
-                }
-            }
-            .chartYAxis(.hidden)
-            .frame(height: 56)
-        } else {
-            Text("近 7 天无本地日志记录")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .frame(maxWidth: .infinity, minHeight: 56)
-        }
     }
 }
 
