@@ -11,11 +11,11 @@ final class UsageHistory {
 
     static let shared = UsageHistory()
 
-    /// 磁盘保留 14 天（展示窗口 7 天，留一倍余量）。
-    static let retention: TimeInterval = 14 * 86400
+    /// 磁盘保留 45 天（「本月用量」需要月初基线）。
+    static let retention: TimeInterval = 45 * 86400
     static let displayWindow: TimeInterval = 7 * 86400
     /// 单条序列的最大采样点数（超出丢最旧），防止长期运行文件膨胀。
-    static let maxPointsPerSeries = 4000
+    static let maxPointsPerSeries = 12000
 
     /// kind.rawValue → 序列 key（"window:周限额" / "balance:API 余额(CNY)"）→ 采样点
     private(set) var series: [String: [String: [Point]]] = [:]
@@ -73,6 +73,16 @@ final class UsageHistory {
     func points(kind: ProviderKind, key: String, now: Date = Date()) -> [Point] {
         let cutoff = now.timeIntervalSince1970 - Self.displayWindow
         return (series[kind.rawValue]?[key] ?? []).filter { $0.ts >= cutoff }
+    }
+
+    /// 累计型序列（如 tokens）在指定起点之后的增量：最新值 − 起点前最近一次采样值。
+    /// 起点前无采样时用最早采样（增量只覆盖采样期内）；周期内厂商计数器重置导致负值时钳制为 0。
+    /// 采样不足两个点时返回 nil。
+    func delta(kind: ProviderKind, key: String, since start: Date, now: Date = Date()) -> Double? {
+        guard let points = series[kind.rawValue]?[key], let latest = points.last else { return nil }
+        let baseline = points.last(where: { $0.ts <= start.timeIntervalSince1970 }) ?? points.first
+        guard let baseline, latest.ts > baseline.ts else { return nil }
+        return max(latest.value - baseline.value, 0)
     }
 
     /// 厂商卡片趋势图跟踪的序列：优先周限额窗口，其次第一个窗口，再退化到第一条余额。

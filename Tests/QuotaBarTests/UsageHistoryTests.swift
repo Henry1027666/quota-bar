@@ -78,3 +78,42 @@ private func snapshot(
         .appendingPathComponent("quota-bar-test-\(UUID().uuidString).json"))
     #expect(history.displayKey(for: balanceOnly) == "balance:API 余额(CNY)")
 }
+
+@MainActor
+@Test func historyDeltaComputesCounterIncrease() {
+    let (history, _) = makeHistory()
+    // 固定时钟，避免测试恰好在凌晨运行时采样点顺序错乱
+    let dayStart = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_780_000_000))
+    let now = dayStart.addingTimeInterval(12 * 3600) // 当天中午
+    func snap(_ tokens: Int) -> ProviderSnapshot {
+        ProviderSnapshot(
+            kind: .kimi, plan: nil, account: nil, windows: [], balances: [],
+            tokenUsage: tokens, requestCount: nil, updatedAt: now, message: nil
+        )
+    }
+    // 计数器采样：昨天 1000 → 今天凌晨 1500 → 现在 2600
+    history.record(snap(1000), at: dayStart.addingTimeInterval(-86400))
+    history.record(snap(1500), at: dayStart.addingTimeInterval(3600))
+    history.record(snap(2600), at: now)
+    // 今日增量 = 最新值 − 起点（0 点）前的最近采样 = 2600 − 1000
+    #expect(history.delta(kind: .kimi, key: "tokens", since: dayStart, now: now) == 1600)
+}
+
+@MainActor
+@Test func historyDeltaClampsCounterResetAndNeedsTwoPoints() {
+    let (history, _) = makeHistory()
+    let dayStart = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_780_000_000))
+    let now = dayStart.addingTimeInterval(12 * 3600)
+    func snap(_ tokens: Int) -> ProviderSnapshot {
+        ProviderSnapshot(
+            kind: .kimi, plan: nil, account: nil, windows: [], balances: [],
+            tokenUsage: tokens, requestCount: nil, updatedAt: now, message: nil
+        )
+    }
+    // 只有一个采样点 → nil
+    history.record(snap(500), at: now)
+    #expect(history.delta(kind: .kimi, key: "tokens", since: dayStart, now: now) == nil)
+    // 计数器中途重置（厂商换了计费周期）→ 负增量钳制为 0
+    history.record(snap(100), at: now.addingTimeInterval(600))
+    #expect(history.delta(kind: .kimi, key: "tokens", since: dayStart, now: now) == 0)
+}

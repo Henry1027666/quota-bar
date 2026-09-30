@@ -314,22 +314,14 @@ private struct TrendsPage: View {
 
             Divider().opacity(0.35)
 
-            let totalTokens = readySnapshots.compactMap(\.tokenUsage).reduce(0, +)
-            if totalTokens > 0 {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: "sum")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Text("Token 总用量")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text(totalTokens.formatted(.number.notation(.compactName)))
-                            .font(.system(size: 15, weight: .semibold))
-                            .monospacedDigit()
+            if let deltas = tokenDeltas {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 0) {
+                        tokenStat(title: "今日用量", value: deltas.today)
+                        tokenStat(title: "本周用量", value: deltas.week)
+                        tokenStat(title: "本月用量", value: deltas.month)
                     }
-                    Text("各厂商返回值之和，统计口径与周期以各厂商为准")
+                    Text("由各厂商 Token 计数器的采样增量估算，口径以各厂商为准")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -368,6 +360,37 @@ private struct TrendsPage: View {
             guard case .ready(let snapshot) = store.states[kind] else { return nil }
             return snapshot
         }
+    }
+
+    /// 各厂商 Token 计数器在今日/本周/本月内的增量之和；无任何厂商返回 token 用量时为 nil。
+    /// 本周以周一为起点（国内习惯）。
+    private var tokenDeltas: (today: Int, week: Int, month: Int)? {
+        let now = Date()
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2
+        let dayStart = cal.startOfDay(for: now)
+        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
+        let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
+        var today = 0.0, week = 0.0, month = 0.0, found = false
+        for snapshot in readySnapshots where snapshot.tokenUsage != nil {
+            found = true
+            today += UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: dayStart, now: now) ?? 0
+            week += UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: weekStart, now: now) ?? 0
+            month += UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: monthStart, now: now) ?? 0
+        }
+        return found ? (Int(today), Int(week), Int(month)) : nil
+    }
+
+    private func tokenStat(title: String, value: Int) -> some View {
+        VStack(spacing: 2) {
+            Text(value.formatted(.number.notation(.compactName)))
+                .font(.system(size: 15, weight: .semibold))
+                .monospacedDigit()
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
