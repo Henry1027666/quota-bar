@@ -314,6 +314,30 @@ private struct TrendsPage: View {
 
             Divider().opacity(0.35)
 
+            let totalTokens = readySnapshots.compactMap(\.tokenUsage).reduce(0, +)
+            if totalTokens > 0 {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "sum")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text("Token 总用量")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(totalTokens.formatted(.number.notation(.compactName)))
+                            .font(.system(size: 15, weight: .semibold))
+                            .monospacedDigit()
+                    }
+                    Text("各厂商返回值之和，统计口径与周期以各厂商为准")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 8)
+
+                Divider().opacity(0.35)
+            }
+
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(readySnapshots, id: \.kind) { snapshot in

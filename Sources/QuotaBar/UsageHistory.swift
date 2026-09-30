@@ -33,7 +33,7 @@ final class UsageHistory {
         load()
     }
 
-    /// 记录一次快照：窗口记录用量比例（0~1），余额记录金额。
+    /// 记录一次快照：窗口记录用量比例（0~1），余额记录金额，token 用量记录条数。
     func record(_ snapshot: ProviderSnapshot, at now: Date = Date()) {
         let ts = now.timeIntervalSince1970
         let kind = snapshot.kind.rawValue
@@ -43,6 +43,9 @@ final class UsageHistory {
         }
         for balance in snapshot.balances {
             dirty = append(kind: kind, key: "balance:\(balance.label)(\(balance.currency))", value: balance.amount, at: ts) || dirty
+        }
+        if let tokens = snapshot.tokenUsage {
+            dirty = append(kind: kind, key: "tokens", value: Double(tokens), at: ts) || dirty
         }
         if dirty { save() }
     }
