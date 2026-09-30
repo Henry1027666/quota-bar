@@ -54,17 +54,13 @@ struct DashboardView: View {
     }
 
     var body: some View {
-        // 主页与综合趋势页之间的卡片式 3D 翻转：当前页 0→-90° 转出，目标页 90°→0 转入。
         ZStack {
             if showingTrends {
                 TrendsPage(store: store, onBack: { showingTrends = false })
-                    .transition(.flip)
             } else {
                 mainContent
-                    .transition(.flip)
             }
         }
-        .animation(.easeInOut(duration: 0.35), value: showingTrends)
         .padding(14)
         .frame(width: 350)
         .background(VisualEffectBackground(opacity: 0.7))
@@ -289,23 +285,6 @@ private struct ProviderCard: View {
             return "\(balance.amount.formatted(.number.precision(.fractionLength(0...2)))) credits"
         }
         return "\(balance.currency) \(balance.amount.formatted(.number.precision(.fractionLength(2))))"
-    }
-}
-
-/// 主面板 ↔ 综合趋势页的卡片式水平翻转过渡。
-private struct FlipModifier: ViewModifier {
-    let angle: Double
-    func body(content: Content) -> some View {
-        content.rotation3DEffect(.degrees(angle), axis: (x: 0, y: 1, z: 0), perspective: 0.6)
-    }
-}
-
-private extension AnyTransition {
-    static var flip: AnyTransition {
-        .asymmetric(
-            insertion: .modifier(active: FlipModifier(angle: 90), identity: FlipModifier(angle: 0)),
-            removal: .modifier(active: FlipModifier(angle: -90), identity: FlipModifier(angle: 0))
-        )
     }
 }
 
