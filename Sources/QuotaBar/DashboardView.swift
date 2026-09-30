@@ -351,28 +351,74 @@ private struct ProviderCard: View {
 }
 
 /// 卡片底部的近 7 天逐日用量迷你趋势：平滑曲线 + 浅渐变面积，无坐标轴，右端为今天。
+/// 鼠标悬停时显示参考线、端点圆点，并在上方浮出「日期 · 当日用量」气泡。
 private struct MiniTrend: View {
     let days: [DailyTokenUsage]
     let tint: Color
+    @State private var hoverDay: DailyTokenUsage?
+    @State private var hoverX: CGFloat = 0
 
     var body: some View {
-        Chart(days, id: \.day) { item in
-            LineMark(
-                x: .value("日期", item.day),
-                y: .value("Tokens", item.tokens)
-            )
-            .foregroundStyle(tint)
-            .interpolationMethod(.catmullRom)
-            .lineStyle(StrokeStyle(lineWidth: 1.5))
-            AreaMark(
-                x: .value("日期", item.day),
-                y: .value("Tokens", item.tokens)
-            )
-            .foregroundStyle(tint.opacity(0.12))
-            .interpolationMethod(.catmullRom)
+        GeometryReader { geo in
+            Chart(days, id: \.day) { item in
+                LineMark(
+                    x: .value("日期", item.day),
+                    y: .value("Tokens", item.tokens)
+                )
+                .foregroundStyle(tint)
+                .interpolationMethod(.catmullRom)
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+                AreaMark(
+                    x: .value("日期", item.day),
+                    y: .value("Tokens", item.tokens)
+                )
+                .foregroundStyle(tint.opacity(0.12))
+                .interpolationMethod(.catmullRom)
+                if hoverDay?.day == item.day {
+                    RuleMark(x: .value("日期", item.day))
+                        .foregroundStyle(tint.opacity(0.35))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    PointMark(
+                        x: .value("日期", item.day),
+                        y: .value("Tokens", item.tokens)
+                    )
+                    .foregroundStyle(tint)
+                    .symbolSize(28)
+                }
+            }
+            .chartXAxis(.hidden)
+            .chartYAxis(.hidden)
+            .chartOverlay { proxy in
+                Rectangle().fill(.clear).contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            hoverX = location.x
+                            // 坐标轴全部隐藏，绘图区与 overlay 同原点同尺寸，直接用 location.x 反解日期
+                            if let date: Date = proxy.value(atX: location.x) {
+                                hoverDay = days.min(by: {
+                                    abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date))
+                                })
+                            }
+                        case .ended:
+                            hoverDay = nil
+                        }
+                    }
+            }
+            .overlay(alignment: .topLeading) {
+                if let hoverDay {
+                    Text("\(hoverDay.day.formatted(.dateTime.month(.wide).day().weekday(.abbreviated))) · \(hoverDay.tokens.formatted(.number.notation(.compactName)))")
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.regularMaterial, in: Capsule())
+                        .overlay(Capsule().strokeBorder(tint.opacity(0.3), lineWidth: 0.5))
+                        .offset(x: min(max(hoverX - 50, 0), max(geo.size.width - 100, 0)), y: -18)
+                        .allowsHitTesting(false)
+                }
+            }
         }
-        .chartXAxis(.hidden)
-        .chartYAxis(.hidden)
         .frame(height: 26)
     }
 }
