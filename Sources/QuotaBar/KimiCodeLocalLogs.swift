@@ -52,8 +52,28 @@ enum KimiCodeLocalLogs {
         return totals
     }
 
-    /// 枚举所有 agents/*/wire.jsonl；只增不改的日志按 mtime 剪枝，跳过本月之前未再写入的文件。
-    private static func wireFiles(sessionsRoot: URL, modifiedSince monthStart: Date) -> [URL] {
+    /// 最近 days 天（含今天）的逐日 token 数，按本地自然日升序，无记录的日期为 0。
+    static func dailyTokens(sessionsRoot: URL, days: Int, now: Date = Date()) -> [DailyTokenUsage] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2
+        let dayStart = cal.startOfDay(for: now)
+        guard let firstDay = cal.date(byAdding: .day, value: -(days - 1), to: dayStart) else { return [] }
+        let firstKey = dayFormatter.string(from: firstDay)
+
+        var perDay: [String: Int] = [:]
+        for file in wireFiles(sessionsRoot: sessionsRoot, modifiedSince: firstDay) {
+            for (day, tokens) in perDayTokens(file) where day >= firstKey {
+                perDay[day, default: 0] += tokens
+            }
+        }
+        return (0..<days).compactMap { offset in
+            guard let day = cal.date(byAdding: .day, value: offset, to: firstDay) else { return nil }
+            return DailyTokenUsage(day: day, tokens: perDay[dayFormatter.string(from: day)] ?? 0)
+        }
+    }
+
+    /// 枚举所有 agents/*/wire.jsonl；只增不改的日志按 mtime 剪枝，跳过起始日期之前未再写入的文件。
+    private static func wireFiles(sessionsRoot: URL, modifiedSince startDate: Date) -> [URL] {
         guard let enumerator = FileManager.default.enumerator(
             at: sessionsRoot,
             includingPropertiesForKeys: [.contentModificationDateKey],
@@ -62,7 +82,7 @@ enum KimiCodeLocalLogs {
         var files: [URL] = []
         for case let url as URL in enumerator where url.lastPathComponent == "wire.jsonl" {
             let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            if let mtime, mtime < monthStart { continue }
+            if let mtime, mtime < startDate { continue }
             files.append(url)
         }
         return files

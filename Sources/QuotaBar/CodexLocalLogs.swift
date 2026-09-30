@@ -46,8 +46,28 @@ enum CodexLocalLogs {
         return totals
     }
 
-    /// sessions 目录按 YYYY/MM/DD 组织（本地日期），只需枚举本月起的日期目录。
-    private static func sessionFiles(sessionsRoot: URL, since monthStartKey: String) -> [URL] {
+    /// 最近 days 天（含今天）的逐日 token 数，按本地自然日升序，无记录的日期为 0。
+    static func dailyTokens(sessionsRoot: URL, days: Int, now: Date = Date()) -> [DailyTokenUsage] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2
+        let dayStart = cal.startOfDay(for: now)
+        guard let firstDay = cal.date(byAdding: .day, value: -(days - 1), to: dayStart) else { return [] }
+        let firstKey = dayFormatter.string(from: firstDay)
+
+        var perDay: [String: Int] = [:]
+        for file in sessionFiles(sessionsRoot: sessionsRoot, since: firstKey) {
+            for (day, tokens) in perDayTokens(file) where day >= firstKey {
+                perDay[day, default: 0] += tokens
+            }
+        }
+        return (0..<days).compactMap { offset in
+            guard let day = cal.date(byAdding: .day, value: offset, to: firstDay) else { return nil }
+            return DailyTokenUsage(day: day, tokens: perDay[dayFormatter.string(from: day)] ?? 0)
+        }
+    }
+
+    /// sessions 目录按 YYYY/MM/DD 组织（本地日期），只需枚举自起始日期起的日期目录。
+    private static func sessionFiles(sessionsRoot: URL, since startKey: String) -> [URL] {
         guard let enumerator = FileManager.default.enumerator(
             at: sessionsRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         ) else { return [] }
@@ -58,7 +78,7 @@ enum CodexLocalLogs {
             let month = url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
             let year = url.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
             let key = "\(year)-\(month)-\(day)"
-            guard key.count == 10, key >= monthStartKey else { continue }
+            guard key.count == 10, key >= startKey else { continue }
             files.append(url)
         }
         return files

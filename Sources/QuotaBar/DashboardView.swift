@@ -321,7 +321,7 @@ private struct TrendsPage: View {
                         tokenStat(title: "本周用量", value: deltas.week)
                         tokenStat(title: "本月用量", value: deltas.month)
                     }
-                    Text("Codex 为本地日志精确统计，其余为采样增量估算")
+                    Text("Codex / Kimi Code 为本地日志精确统计，其余为采样增量估算")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -414,7 +414,9 @@ private struct TrendsPage: View {
                 Spacer()
                 Text("近 7 天").font(.caption2).foregroundStyle(.tertiary)
             }
-            if let key = UsageHistory.shared.displayKey(for: snapshot) {
+            if let daily = snapshot.dailyTokens {
+                DailyTokenChart(days: daily, tint: snapshot.kind.tint)
+            } else if let key = UsageHistory.shared.displayKey(for: snapshot) {
                 TrendChart(
                     points: UsageHistory.shared.points(kind: snapshot.kind, key: key),
                     tint: snapshot.kind.tint,
@@ -474,6 +476,37 @@ private struct TrendChart: View {
         let hi = values.max() ?? 1
         let pad = max((hi - lo) * 0.1, 1e-6)
         return (lo - pad)...(hi + pad)
+    }
+}
+
+/// 近 7 天逐日 token 用量柱状图（本地日志精确统计）；隐藏纵轴，横轴只标注周几。
+private struct DailyTokenChart: View {
+    let days: [DailyTokenUsage]
+    let tint: Color
+
+    var body: some View {
+        if days.contains(where: { $0.tokens > 0 }) {
+            Chart(days, id: \.day) { item in
+                BarMark(
+                    x: .value("日期", item.day, unit: .day),
+                    y: .value("Tokens", item.tokens)
+                )
+                .foregroundStyle(tint.opacity(0.85))
+                .cornerRadius(2)
+            }
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .day)) { _ in
+                    AxisValueLabel(format: .dateTime.weekday(.abbreviated), centered: true)
+                }
+            }
+            .chartYAxis(.hidden)
+            .frame(height: 56)
+        } else {
+            Text("近 7 天无本地日志记录")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, minHeight: 56)
+        }
     }
 }
 

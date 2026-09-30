@@ -39,3 +39,39 @@ import Testing
 
     try FileManager.default.removeItem(at: root)
 }
+
+@Test func codexLocalLogsDailyTokens() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("codex-daily-\(UUID().uuidString)")
+    let sessions = root.appendingPathComponent("sessions")
+    var cal = Calendar(identifier: .gregorian)
+    cal.firstWeekday = 2
+    let now = Date()
+    let dayStart = cal.startOfDay(for: now)
+
+    func write(tokens: Int, day: Date, name: String) throws {
+        let comps = cal.dateComponents([.year, .month, .day], from: day)
+        let dir = sessions.appendingPathComponent(
+            String(format: "%04d/%02d/%02d", comps.year!, comps.month!, comps.day!))
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let iso = ISO8601DateFormatter().string(from: day.addingTimeInterval(12 * 3600))
+        let line = """
+        {"timestamp":"\(iso)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":\(tokens)}}}}
+        """
+        try line.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+
+    try write(tokens: 1000, day: dayStart, name: "a.jsonl")
+    try write(tokens: 500, day: dayStart.addingTimeInterval(-3 * 86400), name: "b.jsonl")
+    // 7 天窗口之外：不计入
+    try write(tokens: 9999, day: dayStart.addingTimeInterval(-10 * 86400), name: "c.jsonl")
+
+    let daily = CodexLocalLogs.dailyTokens(sessionsRoot: sessions, days: 7, now: now)
+    #expect(daily.count == 7)
+    #expect(daily.last?.tokens == 1000)                       // 末位是今天
+    #expect(daily[daily.count - 4].tokens == 500)             // 3 天前
+    #expect(daily.reduce(0) { $0 + $1.tokens } == 1500)       // 窗口外的 9999 不计入
+    #expect(daily.allSatisfy { cal.startOfDay(for: $0.day) == $0.day })
+
+    try FileManager.default.removeItem(at: root)
+}

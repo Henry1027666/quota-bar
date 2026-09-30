@@ -110,16 +110,18 @@ struct KimiProvider: QuotaProvider {
         return exp - Date().timeIntervalSince1970 < 300
     }
 
-    /// Kimi 接口不返回 token 计数：改从本地会话日志精确统计（今日/本周/本月）。
-    /// tokenUsage 展示今日值；tokenBreakdown 供趋势页三栏统计使用。
+    /// Kimi 接口不返回 token 计数：改从本地会话日志精确统计（今日/本周/本月 + 近 7 天逐日）。
+    /// tokenUsage 展示今日值；tokenBreakdown 供趋势页三栏统计，dailyTokens 供趋势图使用。
     private func withLocalTokenStats(_ snapshot: ProviderSnapshot) -> ProviderSnapshot {
         let root = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".kimi-code/sessions")
         let totals = KimiCodeLocalLogs.tokenTotals(sessionsRoot: root)
-        guard totals.month > 0 else { return snapshot }
+        let daily = KimiCodeLocalLogs.dailyTokens(sessionsRoot: root, days: 7)
+        guard totals.month > 0 || daily.contains(where: { $0.tokens > 0 }) else { return snapshot }
         var result = snapshot
         result.tokenUsage = totals.today
         result.tokenBreakdown = TokenBreakdown(today: totals.today, week: totals.week, month: totals.month)
+        result.dailyTokens = daily
         return result
     }
 

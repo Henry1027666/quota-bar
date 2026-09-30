@@ -91,6 +91,9 @@ struct ProviderSnapshot: Identifiable, Equatable, Sendable {
     /// Token 用量的按日精确分解（今日/本周/本月），由能给出精确数据的厂商填充
     /// （如 Codex 本地会话日志统计）；nil 时趋势页回退到采样增量估算。
     var tokenBreakdown: TokenBreakdown? = nil
+    /// 近 7 天逐日 token 用量（本地日志精确统计，升序，末位为今天）；
+    /// 非 nil 时趋势页用它替换采样百分比曲线。
+    var dailyTokens: [DailyTokenUsage]? = nil
     var updatedAt: Date
     var message: String?
 
@@ -118,6 +121,13 @@ struct TokenBreakdown: Equatable, Sendable {
     let today: Int
     let week: Int
     let month: Int
+}
+
+/// 某自然日的 token 用量（本地日志精确统计）。
+struct DailyTokenUsage: Equatable, Sendable {
+    /// 当日 00:00 本地时间
+    let day: Date
+    let tokens: Int
 }
 
 /// 面板内厂商卡片的显示档位，rawValue 越小越靠前。

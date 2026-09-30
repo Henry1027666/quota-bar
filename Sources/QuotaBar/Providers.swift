@@ -30,12 +30,15 @@ struct CodexProvider: QuotaProvider {
             throw QuotaError.notAuthenticated("未检测到 Codex 登录")
         }
 
-        // Codex 接口不返回 token 计数：改从本地会话日志精确统计（今日/本周/本月）。
-        // tokenUsage 展示今日值；tokenBreakdown 供趋势页三栏统计使用。
-        let totals = CodexLocalLogs.tokenTotals(sessionsRoot: home.appendingPathComponent("sessions"))
-        if totals.month > 0 {
+        // Codex 接口不返回 token 计数：改从本地会话日志精确统计（今日/本周/本月 + 近 7 天逐日）。
+        // tokenUsage 展示今日值；tokenBreakdown 供趋势页三栏统计，dailyTokens 供趋势图使用。
+        let sessions = home.appendingPathComponent("sessions")
+        let totals = CodexLocalLogs.tokenTotals(sessionsRoot: sessions)
+        let daily = CodexLocalLogs.dailyTokens(sessionsRoot: sessions, days: 7)
+        if totals.month > 0 || daily.contains(where: { $0.tokens > 0 }) {
             result.tokenUsage = totals.today
             result.tokenBreakdown = TokenBreakdown(today: totals.today, week: totals.week, month: totals.month)
+            result.dailyTokens = daily
         }
         return result
     }
