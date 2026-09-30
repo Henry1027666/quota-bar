@@ -241,30 +241,6 @@ private struct ProviderCard: View {
                         }
                     }
                 }
-                // DeepSeek 的 token/请求行不展示（趋势曲线已含 token 信息，请求数为 30 天口径易误导）
-                if kind != .deepSeek, snapshot.tokenUsage != nil || snapshot.requestCount != nil {
-                    VStack(spacing: 4) {
-                        if let tokens = snapshot.tokenUsage {
-                            HStack {
-                                Text("Tokens · 今日").foregroundStyle(.secondary)
-                                Spacer()
-                                Text(tokens.formatted(.number.notation(.compactName)))
-                                    .monospacedDigit()
-                                    .fontWeight(.medium)
-                            }
-                        }
-                        if let requests = snapshot.requestCount {
-                            HStack {
-                                Text("请求").foregroundStyle(.secondary)
-                                Spacer()
-                                Text(requests.formatted())
-                                    .monospacedDigit()
-                                    .fontWeight(.medium)
-                            }
-                        }
-                    }
-                    .font(.caption)
-                }
                 if let days = trendDays {
                     MiniTrend(days: days, tint: kind.tint)
                 }
