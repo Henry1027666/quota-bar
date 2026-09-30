@@ -83,12 +83,48 @@ import Testing
     #expect(web != nil)
     #expect(web?.requestCount == 7)
     #expect(web?.tokenUsage == 750)
+    // 逐日 bucket 保留：day1 = 100+200+300，day2 = 0+50+100
+    let day1 = east8DayKey(Date(timeIntervalSince1970: 1786204800))
+    let day2 = east8DayKey(Date(timeIntervalSince1970: 1786291200))
+    #expect(web?.dailyTokens[day1] == 600)
+    #expect(web?.dailyTokens[day2] == 150)
     #expect(web?.balances.contains { $0.label == "累计消费" && abs($0.amount - 519.49) < 0.01 } == true)
     #expect(web?.balances.contains { $0.label == "今日消费" && abs($0.amount - 0.75) < 0.01 } == true)
     #expect(web?.balances.contains { $0.label == "近30天消费" && abs($0.amount - 4.50) < 0.01 } == true)
     // 充值余额与官方 API 余额重复，不重复展示；零值赠送余额也不显示
     #expect(web?.balances.contains { $0.label == "充值余额" } == false)
     #expect(web?.balances.contains { $0.label == "赠送余额" } == false)
+}
+
+@Test func deepSeekPeriodStatsFromDailyBuckets() {
+    let now = Date()
+    var cal = Calendar(identifier: .gregorian)
+    cal.firstWeekday = 2
+    cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+    let dayStart = cal.startOfDay(for: now)
+    let weekStart = cal.dateInterval(of: .weekOfYear, for: now)!.start
+
+    let daily: [String: Int] = [
+        east8DayKey(dayStart): 100,                                  // 今天
+        east8DayKey(dayStart.addingTimeInterval(-86400)): 50,        // 昨天
+        east8DayKey(dayStart.addingTimeInterval(-40 * 86400)): 9999  // 40 天前：任何区间都不计入
+    ]
+    let stats = DeepSeekProvider.periodStats(daily, now: now)
+    #expect(stats.today == 100)
+    let yesterdayInWeek = dayStart.addingTimeInterval(-86400) >= weekStart
+    #expect(stats.breakdown.week == (yesterdayInWeek ? 150 : 100))
+    #expect(stats.breakdown.month == 150)
+    #expect(stats.daily.count == 7)
+    #expect(stats.daily.last?.tokens == 100)
+    #expect(stats.daily.reduce(0) { $0 + $1.tokens } == 150)
+}
+
+/// 东八区 "yyyy-MM-dd"，与 DeepSeekProvider 的 bucket day key 口径一致。
+private func east8DayKey(_ date: Date) -> String {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd"
+    f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+    return f.string(from: date)
 }
 
 /// 东八区「今天 00:00」的 epoch（与 DeepSeek 用量接口 tz=28800 口径一致）。

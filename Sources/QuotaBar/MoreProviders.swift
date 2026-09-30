@@ -308,6 +308,8 @@ struct DeepSeekProvider: QuotaProvider {
         // （曾实测 40MB→800MB 卡死）。
         var tokenUsage: Int?
         var requestCount: Int?
+        var tokenBreakdown: TokenBreakdown?
+        var dailyTokens: [DailyTokenUsage]?
         var message: String?
         if let webToken = discoverWebToken() {
             Log.append("DS", "发现网页会话 token (前缀 \(webToken.prefix(12))…)，拉取用量接口")
@@ -315,6 +317,15 @@ struct DeepSeekProvider: QuotaProvider {
             do {
                 let web = try await fetchWebUsage(bearer: webToken)
                 applyWeb(web, to: &balances, &tokenUsage, &requestCount)
+                // amount 接口返回近 30 天逐日 bucket：卡片改为展示今日值，
+                // 并补齐精确周期分解（今日/本周/本月）与近 7 天逐日趋势。
+                // 注：bucket 仅覆盖近 30 天，每月 31 号时「本月」可能缺 1 号一天。
+                if !web.dailyTokens.isEmpty {
+                    let stats = Self.periodStats(web.dailyTokens)
+                    tokenUsage = stats.today
+                    tokenBreakdown = stats.breakdown
+                    dailyTokens = stats.daily
+                }
                 Log.append("DS", "用量接口成功: balances=\(web.balances.count) tokens=\(String(describing: web.tokenUsage)) req=\(String(describing: web.requestCount))")
                 if web.isEmpty { message = "网页用量接口未返回数据" }
             } catch let QuotaError.sessionExpired(msg) {
@@ -331,12 +342,15 @@ struct DeepSeekProvider: QuotaProvider {
             message = "未开启今日用量：点下方「登录 DeepSeek」"
         }
 
-        return ProviderSnapshot(
+        var snapshot = ProviderSnapshot(
             kind: kind, plan: "API", account: nil, windows: [], balances: balances,
             tokenUsage: tokenUsage, requestCount: requestCount, updatedAt: Date(),
             message: Support.bool(root["is_available"]) == false ? "余额暂不可用"
                 : (message ?? (balances.isEmpty ? "服务未返回余额" : nil))
         )
+        snapshot.tokenBreakdown = tokenBreakdown
+        snapshot.dailyTokens = dailyTokens
+        return snapshot
     }
 
     private func applyWeb(_ web: WebUsage, to balances: inout [MoneyBalance],
@@ -356,6 +370,8 @@ struct DeepSeekProvider: QuotaProvider {
         var balances: [MoneyBalance] = []
         var tokenUsage: Int?
         var requestCount: Int?
+        /// 逐日 token 数（东八区 "yyyy-MM-dd" → tokens），来自 amount 接口的逐日 bucket。
+        var dailyTokens: [String: Int] = [:]
         var isEmpty: Bool { balances.isEmpty && tokenUsage == nil && requestCount == nil }
     }
 
@@ -455,7 +471,8 @@ struct DeepSeekProvider: QuotaProvider {
         }
     }
 
-    /// by_api_key/amount：series[].buckets[].usage 逐日求和（近 30 天请求数 / Tokens）。
+    /// by_api_key/amount：series[].buckets[].usage 逐日求和（近 30 天请求数 / Tokens），
+    /// 并按 bucket 的 time（东八区逐日 bucket）保留逐日 token 数，供精确周期统计与趋势图。
     private static func parseAmount(_ json: Any, into result: inout WebUsage) {
         guard let biz = bizData(json),
               let series = biz["series"] as? [[String: Any]] else { return }
@@ -465,13 +482,54 @@ struct DeepSeekProvider: QuotaProvider {
             for bucket in (item["buckets"] as? [[String: Any]] ?? []) {
                 guard let usage = bucket["usage"] as? [String: Any] else { continue }
                 requests += Int(Support.firstNumber(in: usage, keys: ["REQUEST"]) ?? 0)
-                tokens += Int(Support.firstNumber(in: usage, keys: ["PROMPT_CACHE_HIT_TOKEN"]) ?? 0)
+                let bucketTokens = Int(Support.firstNumber(in: usage, keys: ["PROMPT_CACHE_HIT_TOKEN"]) ?? 0)
                     + Int(Support.firstNumber(in: usage, keys: ["PROMPT_CACHE_MISS_TOKEN"]) ?? 0)
                     + Int(Support.firstNumber(in: usage, keys: ["RESPONSE_TOKEN", "COMPLETION_TOKEN"]) ?? 0)
+                tokens += bucketTokens
+                if let t = Support.firstNumber(in: bucket, keys: ["time"]) {
+                    let day = dayKeyFormatter.string(from: Date(timeIntervalSince1970: t))
+                    result.dailyTokens[day, default: 0] += bucketTokens
+                }
             }
         }
         result.requestCount = requests
         result.tokenUsage = tokens
+    }
+
+    /// bucket 日期口径：接口按 tz=28800 逐日分桶，day key 统一用东八区格式化。
+    private static let dayKeyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        return f
+    }()
+
+    /// 从逐日 token 表（东八区 day key）得出 今日/本周（周一起）/本月 合计与近 7 天逐日序列。
+    static func periodStats(
+        _ dailyTokens: [String: Int], now: Date = Date()
+    ) -> (today: Int, breakdown: TokenBreakdown, daily: [DailyTokenUsage]) {
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2
+        cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let dayStart = cal.startOfDay(for: now)
+        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
+        let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
+        let todayKey = dayKeyFormatter.string(from: dayStart)
+        let weekKey = dayKeyFormatter.string(from: weekStart)
+        let monthKey = dayKeyFormatter.string(from: monthStart)
+
+        var today = 0, week = 0, month = 0
+        for (day, tokens) in dailyTokens {
+            if day >= monthKey { month += tokens }
+            if day >= weekKey { week += tokens }
+            if day == todayKey { today += tokens }
+        }
+        let firstDay = cal.date(byAdding: .day, value: -6, to: dayStart) ?? dayStart
+        let daily = (0..<7).compactMap { offset -> DailyTokenUsage? in
+            guard let day = cal.date(byAdding: .day, value: offset, to: firstDay) else { return nil }
+            return DailyTokenUsage(day: day, tokens: dailyTokens[dayKeyFormatter.string(from: day)] ?? 0)
+        }
+        return (today, TokenBreakdown(today: today, week: week, month: month), daily)
     }
 
     /// by_api_key/cost：data[].series[].buckets[].cost 逐日求和（今日消费 + 近 30 天消费）。

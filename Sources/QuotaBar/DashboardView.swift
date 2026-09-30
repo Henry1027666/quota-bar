@@ -129,7 +129,7 @@ struct DashboardView: View {
                     tokenStat(title: "本周用量", value: deltas.week)
                     tokenStat(title: "本月用量", value: deltas.month)
                 }
-                Text("Codex / Kimi Code 为本地日志精确统计，其余为采样增量估算")
+                Text("token 用量为逐日精确统计（本地日志 / 厂商接口）")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -250,8 +250,7 @@ private struct ProviderCard: View {
                     VStack(spacing: 4) {
                         if let tokens = snapshot.tokenUsage {
                             HStack {
-                                // DeepSeek 的用量接口按近 30 天汇总，其余厂商为今日口径
-                                Text(kind == .deepSeek ? "Tokens · 近30天" : "Tokens · 今日").foregroundStyle(.secondary)
+                                Text("Tokens · 今日").foregroundStyle(.secondary)
                                 Spacer()
                                 Text(tokens.formatted(.number.notation(.compactName)))
                                     .monospacedDigit()
