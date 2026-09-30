@@ -123,15 +123,10 @@ struct DashboardView: View {
     @ViewBuilder
     private var summarySection: some View {
         if let deltas = tokenDeltas {
-            VStack(spacing: 6) {
-                HStack(spacing: 0) {
-                    tokenStat(title: "今日用量", value: deltas.today)
-                    tokenStat(title: "本周用量", value: deltas.week)
-                    tokenStat(title: "本月用量", value: deltas.month)
-                }
-                Text("token 用量为逐日精确统计（本地日志 / 厂商接口）")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+            HStack(spacing: 0) {
+                tokenStat(title: "今日用量", value: deltas.today)
+                tokenStat(title: "本周用量", value: deltas.week)
+                tokenStat(title: "本月用量", value: deltas.month)
             }
             .padding(.bottom, 6)
 
@@ -232,13 +227,13 @@ private struct ProviderCard: View {
                         }
                     }
                 }
-                if !snapshot.balances.isEmpty {
+                if !displayBalances.isEmpty {
                     VStack(spacing: 4) {
-                        ForEach(snapshot.balances) { balance in
+                        ForEach(displayBalances, id: \.label) { group in
                             HStack {
-                                Text(balance.label).foregroundStyle(.secondary)
+                                Text(group.label).foregroundStyle(.secondary)
                                 Spacer()
-                                Text(balanceText(balance))
+                                Text(group.text)
                                     .monospacedDigit()
                                     .fontWeight(.medium)
                             }
@@ -246,7 +241,8 @@ private struct ProviderCard: View {
                         }
                     }
                 }
-                if snapshot.tokenUsage != nil || snapshot.requestCount != nil {
+                // DeepSeek 的 token/请求行不展示（趋势曲线已含 token 信息，请求数为 30 天口径易误导）
+                if kind != .deepSeek, snapshot.tokenUsage != nil || snapshot.requestCount != nil {
                     VStack(spacing: 4) {
                         if let tokens = snapshot.tokenUsage {
                             HStack {
@@ -259,7 +255,7 @@ private struct ProviderCard: View {
                         }
                         if let requests = snapshot.requestCount {
                             HStack {
-                                Text(kind == .deepSeek ? "请求 · 近30天" : "请求").foregroundStyle(.secondary)
+                                Text("请求").foregroundStyle(.secondary)
                                 Spacer()
                                 Text(requests.formatted())
                                     .monospacedDigit()
@@ -327,6 +323,22 @@ private struct ProviderCard: View {
             } else {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
             }
+        }
+    }
+
+    /// 卡片展示的余额行：DeepSeek 隐藏「近30天消费」；同名行（如 API 余额的 CNY/USD 两条）
+    /// 合并为一行，金额用 " / " 连接，保持首次出现顺序。
+    private var displayBalances: [(label: String, text: String)] {
+        guard case .ready(let snapshot) = state else { return [] }
+        var order: [String] = []
+        var grouped: [String: [MoneyBalance]] = [:]
+        for balance in snapshot.balances {
+            if kind == .deepSeek, balance.label == "近30天消费" { continue }
+            if grouped[balance.label] == nil { order.append(balance.label) }
+            grouped[balance.label, default: []].append(balance)
+        }
+        return order.map { label in
+            (label, grouped[label]!.map(balanceText).joined(separator: " / "))
         }
     }
 
