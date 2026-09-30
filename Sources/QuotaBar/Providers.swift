@@ -56,8 +56,6 @@ struct CodexProvider: QuotaProvider {
         if let extras = root["additional_rate_limits"] {
             windows += Support.parseGenericWindows(extras, preferredLabels: ["week": "周限额", "five": "5 小时"])
         }
-        let credits = root["credits"] as? [String: Any]
-        let balance = credits.flatMap { Support.firstNumber(in: $0, keys: ["balance", "remaining", "available"]) }
         let claims = Support.jwtClaims(token)
         let auth = claims?["https://api.openai.com/auth"] as? [String: Any]
         let profile = claims?["https://api.openai.com/profile"] as? [String: Any]
@@ -66,11 +64,11 @@ struct CodexProvider: QuotaProvider {
             plan: Support.firstString(in: root, keys: ["plan_type", "planName", "plan"]) ?? Support.string(auth?["chatgpt_plan_type"]),
             account: Support.string(profile?["email"] ?? claims?["email"]),
             windows: windows,
-            balances: balance.map { [MoneyBalance(label: "加油包", amount: $0, currency: "credits")] } ?? [],
+            balances: [],
             tokenUsage: nil,
             requestCount: nil,
             updatedAt: Date(),
-            message: windows.isEmpty && balance == nil ? "服务未返回可展示额度" : nil
+            message: windows.isEmpty ? "服务未返回可展示额度" : nil
         )
     }
 
