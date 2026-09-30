@@ -12,6 +12,7 @@ struct CodexProvider: QuotaProvider {
         let accessToken = Support.string(tokens?["access_token"] ?? auth["access_token"])
         let apiKey = Support.string(auth["OPENAI_API_KEY"] ?? auth["openai_api_key"])
 
+        var result: ProviderSnapshot
         if let accessToken {
             var headers: [String: String] = ["User-Agent": "codex-cli"]
             if let accountID = Support.string(tokens?["account_id"] ?? auth["account_id"]) {
@@ -22,10 +23,21 @@ struct CodexProvider: QuotaProvider {
                 bearer: accessToken,
                 headers: headers
             )
-            return snapshot(payload: payload, token: accessToken)
+            result = snapshot(payload: payload, token: accessToken)
+        } else if let apiKey {
+            result = try await fetchAPIBalance(apiKey)
+        } else {
+            throw QuotaError.notAuthenticated("未检测到 Codex 登录")
         }
-        if let apiKey { return try await fetchAPIBalance(apiKey) }
-        throw QuotaError.notAuthenticated("未检测到 Codex 登录")
+
+        // Codex 接口不返回 token 计数：改从本地会话日志精确统计（今日/本周/本月）。
+        // tokenUsage 展示今日值；tokenBreakdown 供趋势页三栏统计使用。
+        let totals = CodexLocalLogs.tokenTotals(sessionsRoot: home.appendingPathComponent("sessions"))
+        if totals.month > 0 {
+            result.tokenUsage = totals.today
+            result.tokenBreakdown = TokenBreakdown(today: totals.today, week: totals.week, month: totals.month)
+        }
+        return result
     }
 
     private func snapshot(payload: Any, token: String) -> ProviderSnapshot {

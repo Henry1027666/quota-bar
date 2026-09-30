@@ -321,7 +321,7 @@ private struct TrendsPage: View {
                         tokenStat(title: "本周用量", value: deltas.week)
                         tokenStat(title: "本月用量", value: deltas.month)
                     }
-                    Text("由各厂商 Token 计数器的采样增量估算，口径以各厂商为准")
+                    Text("Codex 为本地日志精确统计，其余为采样增量估算")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -363,7 +363,8 @@ private struct TrendsPage: View {
     }
 
     /// 各厂商 Token 计数器在今日/本周/本月内的增量之和；无任何厂商返回 token 用量时为 nil。
-    /// 本周以周一为起点（国内习惯）。
+    /// 本周以周一为起点（国内习惯）。有精确分解（如 Codex 本地日志）的厂商用精确值，
+    /// 其余用采样增量估算。
     private var tokenDeltas: (today: Int, week: Int, month: Int)? {
         let now = Date()
         var cal = Calendar(identifier: .gregorian)
@@ -371,14 +372,21 @@ private struct TrendsPage: View {
         let dayStart = cal.startOfDay(for: now)
         let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
         let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
-        var today = 0.0, week = 0.0, month = 0.0, found = false
-        for snapshot in readySnapshots where snapshot.tokenUsage != nil {
-            found = true
-            today += UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: dayStart, now: now) ?? 0
-            week += UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: weekStart, now: now) ?? 0
-            month += UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: monthStart, now: now) ?? 0
+        var today = 0, week = 0, month = 0, found = false
+        for snapshot in readySnapshots {
+            if let breakdown = snapshot.tokenBreakdown {
+                found = true
+                today += breakdown.today
+                week += breakdown.week
+                month += breakdown.month
+            } else if snapshot.tokenUsage != nil {
+                found = true
+                today += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: dayStart, now: now) ?? 0)
+                week += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: weekStart, now: now) ?? 0)
+                month += Int(UsageHistory.shared.delta(kind: snapshot.kind, key: "tokens", since: monthStart, now: now) ?? 0)
+            }
         }
-        return found ? (Int(today), Int(week), Int(month)) : nil
+        return found ? (today, week, month) : nil
     }
 
     private func tokenStat(title: String, value: Int) -> some View {
