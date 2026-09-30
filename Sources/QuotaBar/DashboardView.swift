@@ -31,14 +31,16 @@ private struct VisualEffectBackground: NSViewRepresentable {
 struct DashboardView: View {
     @ObservedObject var store: QuotaStore
     @State private var refreshHovered = false
+    @State private var trendHovered = false
+    @State private var showingTrends = false
     /// 内容高度变化回调：AppDelegate 据此更新 popover 尺寸，实现窗口随条目自适应。
     var onContentHeightChange: ((CGFloat) -> Void)?
 
     /// 内容区（ScrollView）最大高度：条目再多也不超过此高度，超出滚动。
-    private static let maxContentHeight: CGFloat = 560
+    static let maxContentHeight: CGFloat = 560
 
     /// 可见厂商按「token plan → API → free」排序，free 统一排最下方；同档保持稳定顺序。
-    private var sortedKinds: [ProviderKind] {
+    fileprivate var sortedKinds: [ProviderKind] {
         let visible = ProviderKind.allCases.filter {
             if case .notDetected = store.states[$0] { return false }
             return true
@@ -52,7 +54,53 @@ struct DashboardView: View {
     }
 
     var body: some View {
+        // 主页与综合趋势页之间的卡片式 3D 翻转：当前页 0→-90° 转出，目标页 90°→0 转入。
+        ZStack {
+            if showingTrends {
+                TrendsPage(store: store, onBack: { showingTrends = false })
+                    .transition(.flip)
+            } else {
+                mainContent
+                    .transition(.flip)
+            }
+        }
+        .animation(.easeInOut(duration: 0.35), value: showingTrends)
+        .padding(14)
+        .frame(width: 350)
+        .background(VisualEffectBackground(opacity: 0.7))
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { onContentHeightChange?(geo.size.height) }
+                    .onChange(of: geo.size.height) { _, newHeight in
+                        onContentHeightChange?(newHeight)
+                    }
+            }
+        )
+        .fixedSize(horizontal: false, vertical: true)
+        .task { await store.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: .dsWebUsageUpdated)) { _ in
+            Task { await store.refresh(force: true) }
+        }
+    }
+
+    private var mainContent: some View {
         VStack(spacing: 0) {
+            // 顶栏：右侧综合趋势入口
+            HStack {
+                Spacer()
+                Button { showingTrends = true } label: {
+                    Image(systemName: "chart.line.uptrend.xyaxis")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(trendHovered ? .primary : .secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onHover { trendHovered = $0 }
+                .help("综合趋势")
+            }
+            .padding(.bottom, 6)
+
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(sortedKinds.enumerated()), id: \.element) { index, kind in
@@ -70,23 +118,6 @@ struct DashboardView: View {
 
             Divider().opacity(0.35)
             footer
-        }
-        .padding(14)
-        .frame(width: 350)
-        .background(VisualEffectBackground(opacity: 0.7))
-        .background(
-            GeometryReader { geo in
-                Color.clear
-                    .onAppear { onContentHeightChange?(geo.size.height) }
-                    .onChange(of: geo.size.height) { _, newHeight in
-                        onContentHeightChange?(newHeight)
-                    }
-            }
-        )
-        .fixedSize(horizontal: false, vertical: true)
-        .task { await store.refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: .dsWebUsageUpdated)) { _ in
-            Task { await store.refresh(force: true) }
         }
     }
 
@@ -211,9 +242,6 @@ private struct ProviderCard: View {
                 if let message = snapshot.message {
                     Text(message).font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                if let trendKey = UsageHistory.shared.displayKey(for: snapshot) {
-                    TrendView(kind: kind, seriesKey: trendKey, tint: kind.tint)
-                }
             }
         }
         .padding(.vertical, 10)
@@ -264,50 +292,148 @@ private struct ProviderCard: View {
     }
 }
 
-/// 近 7 天用量趋势迷你图：折线 + 渐变面积，隐藏坐标轴。
-/// 窗口类序列固定 0~1 纵轴（用量占比）；余额类按数据自适应。
-private struct TrendView: View {
-    let kind: ProviderKind
-    let seriesKey: String
-    let tint: Color
+/// 主面板 ↔ 综合趋势页的卡片式水平翻转过渡。
+private struct FlipModifier: ViewModifier {
+    let angle: Double
+    func body(content: Content) -> some View {
+        content.rotation3DEffect(.degrees(angle), axis: (x: 0, y: 1, z: 0), perspective: 0.6)
+    }
+}
 
-    private var isPercent: Bool { seriesKey.hasPrefix("window:") }
+private extension AnyTransition {
+    static var flip: AnyTransition {
+        .asymmetric(
+            insertion: .modifier(active: FlipModifier(angle: 90), identity: FlipModifier(angle: 0)),
+            removal: .modifier(active: FlipModifier(angle: -90), identity: FlipModifier(angle: 0))
+        )
+    }
+}
+
+/// 综合趋势页：左上角返回，逐厂商展示近 7 天趋势；无采样时展示占位而非隐藏。
+private struct TrendsPage: View {
+    @ObservedObject var store: QuotaStore
+    let onBack: () -> Void
+    @State private var backHovered = false
 
     var body: some View {
-        let points = UsageHistory.shared.points(kind: kind, key: seriesKey)
-        if points.count >= 3 {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack {
-                    Text("近 7 天趋势")
-                    Spacer()
-                    Text(isPercent ? "用量占比" : seriesKey.replacingOccurrences(of: "balance:", with: ""))
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(backHovered ? .primary : .secondary)
+                        .contentShape(Rectangle())
                 }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .buttonStyle(.plain)
+                .onHover { backHovered = $0 }
+                .help("返回")
+                Text("综合趋势")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+            }
+            .padding(.bottom, 8)
 
-                Chart {
-                    ForEach(points, id: \.ts) { point in
-                        LineMark(
-                            x: .value("时间", Date(timeIntervalSince1970: point.ts)),
-                            y: .value("值", point.value)
-                        )
-                        .foregroundStyle(tint)
-                        AreaMark(
-                            x: .value("时间", Date(timeIntervalSince1970: point.ts)),
-                            y: .value("值", point.value)
-                        )
-                        .foregroundStyle(tint.opacity(0.15))
+            Divider().opacity(0.35)
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(readySnapshots, id: \.kind) { snapshot in
+                        trendSection(for: snapshot)
+                        if snapshot.kind != readySnapshots.last?.kind {
+                            Divider().opacity(0.35).padding(.horizontal, 2)
+                        }
                     }
                 }
-                .chartXAxis(.hidden)
-                .chartYAxis(.hidden)
-                .chartYScale(domain: yDomain(for: points))
-                .frame(height: 36)
+                .padding(.vertical, 4)
             }
+            .scrollIndicators(.hidden)
+            .frame(maxHeight: DashboardView.maxContentHeight)
         }
     }
 
-    private func yDomain(for points: [UsageHistory.Point]) -> ClosedRange<Double> {
+    /// 按主面板同样的排序展示已就绪的厂商。
+    private var readySnapshots: [ProviderSnapshot] {
+        let kinds = ProviderKind.allCases.filter {
+            if case .notDetected = store.states[$0] { return false }
+            return true
+        }.sorted { lhs, rhs in
+            let lt = store.states[lhs]?.tier ?? .free
+            let rt = store.states[rhs]?.tier ?? .free
+            return lt != rt ? lt < rt : lhs.rawValue < rhs.rawValue
+        }
+        return kinds.compactMap { kind in
+            guard case .ready(let snapshot) = store.states[kind] else { return nil }
+            return snapshot
+        }
+    }
+
+    @ViewBuilder
+    private func trendSection(for snapshot: ProviderSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: snapshot.kind.symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(snapshot.kind.tint)
+                    .frame(width: 18, height: 18)
+                    .background(snapshot.kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                Text(snapshot.kind.name).font(.caption).fontWeight(.medium)
+                Spacer()
+                Text("近 7 天").font(.caption2).foregroundStyle(.tertiary)
+            }
+            if let key = UsageHistory.shared.displayKey(for: snapshot) {
+                TrendChart(
+                    points: UsageHistory.shared.points(kind: snapshot.kind, key: key),
+                    tint: snapshot.kind.tint,
+                    isPercent: key.hasPrefix("window:"),
+                    emptyText: "暂无足够采样数据，使用中会每 5 分钟自动积累"
+                )
+            } else {
+                Text("该厂商没有可跟踪的额度序列")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+/// 近 7 天用量趋势图：折线 + 渐变面积，隐藏坐标轴；数据不足时显示占位文字。
+/// 窗口类序列固定 0~1 纵轴（用量占比）；余额类按数据自适应。
+private struct TrendChart: View {
+    let points: [UsageHistory.Point]
+    let tint: Color
+    let isPercent: Bool
+    let emptyText: String
+
+    var body: some View {
+        if points.count >= 3 {
+            Chart {
+                ForEach(points, id: \.ts) { point in
+                    LineMark(
+                        x: .value("时间", Date(timeIntervalSince1970: point.ts)),
+                        y: .value("值", point.value)
+                    )
+                    .foregroundStyle(tint)
+                    AreaMark(
+                        x: .value("时间", Date(timeIntervalSince1970: point.ts)),
+                        y: .value("值", point.value)
+                    )
+                    .foregroundStyle(tint.opacity(0.15))
+                }
+            }
+            .chartXAxis(.hidden)
+            .chartYAxis(.hidden)
+            .chartYScale(domain: yDomain)
+            .frame(height: 56)
+        } else {
+            Text(emptyText)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, minHeight: 56)
+        }
+    }
+
+    private var yDomain: ClosedRange<Double> {
         if isPercent { return 0...1 }
         let values = points.map(\.value)
         let lo = values.min() ?? 0
