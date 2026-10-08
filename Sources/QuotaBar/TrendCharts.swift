@@ -1,9 +1,28 @@
 import Charts
 import SwiftUI
 
-/// 趋势图统计周期（今日 / 近 7 天 / 近 30 天）。
-enum TrendPeriod {
-    case today, last7, last30
+/// 趋势图统计周期（今日 / 近 7 天 / 近 30 天 / 近一年）。
+enum TrendPeriod: CaseIterable {
+    case today, last7, last30, last365
+
+    var title: String {
+        switch self {
+        case .today: "今日"
+        case .last7: "近7天"
+        case .last30: "近30天"
+        case .last365: "近一年"
+        }
+    }
+
+    /// 逐日序列天数（今日视图走逐小时，不用这个）。
+    var days: Int {
+        switch self {
+        case .today: 1
+        case .last7: 7
+        case .last30: 30
+        case .last365: 365
+        }
+    }
 }
 
 /// 一个厂商的逐日 token 序列（综合趋势图 / 点阵图用）。
@@ -135,7 +154,7 @@ struct QuotaRow: View {
     }
 }
 
-/// 趋势图翻页器：周期切换（今日/近7天/近30天）+ ‹ 日期范围 › 翻页头 + 固定高度图表区，
+/// 趋势图翻页器：周期切换（今日/近7天/近30天/近一年）+ ‹ 日期范围 › 翻页头 + 固定高度图表区，
 /// 切换周期或翻页时窗口不抖动。主窗口总览页使用。
 struct TrendChartPager: View {
     let kinds: [ProviderKind]
@@ -144,21 +163,20 @@ struct TrendChartPager: View {
     var chartHeight: CGFloat = 96
 
     @State private var period: TrendPeriod = .today
-    /// 图表翻页偏移：0 为当前周期，每翻一页回退一个周期（日/周/月随 period）。
+    /// 图表翻页偏移：0 为当前周期，每翻一页回退一个周期（日/周/月/年随 period）。
     @State private var pageOffset = 0
 
     var body: some View {
         VStack(spacing: 6) {
             HStack(spacing: 6) {
-                Picker("统计周期", selection: $period) {
-                    Text("今日").tag(TrendPeriod.today)
-                    Text("近7天").tag(TrendPeriod.last7)
-                    Text("近30天").tag(TrendPeriod.last30)
+                // 自绘胶囊 tab：系统 segmented Picker 在 macOS 26 上会画出容器外（选中胶囊溢出左边界）
+                HStack(spacing: 2) {
+                    ForEach(TrendPeriod.allCases, id: \.title) { p in
+                        periodTab(p)
+                    }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 170)
-                .onChange(of: period) { _, _ in pageOffset = 0 }
+                .padding(2)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 Spacer()
 
@@ -207,13 +225,13 @@ struct TrendChartPager: View {
                     } else {
                         HourlyTrendChart(trends: pagedHourlyTrends)
                     }
-                case .last7:
+                case .last7, .last30:
                     if pagedDailyTrends.isEmpty {
                         chartPlaceholder("该时段无用量数据")
                     } else {
                         CombinedTrendChart(trends: pagedDailyTrends)
                     }
-                case .last30:
+                case .last365:
                     if pagedDailyTrends.isEmpty {
                         chartPlaceholder("该时段无用量数据")
                     } else {
@@ -225,17 +243,33 @@ struct TrendChartPager: View {
         }
     }
 
-    /// 当前页锚定的窗口末日：pageOffset 为 0 时是今天，每翻一页回退一个周期。
-    private var pageEndDay: Date {
-        let step = switch period {
-        case .today: 1
-        case .last7: 7
-        case .last30: 30
+    private func periodTab(_ p: TrendPeriod) -> some View {
+        let selected = period == p
+        return Button {
+            period = p
+            pageOffset = 0
+        } label: {
+            Text(p.title)
+                .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? .primary : .secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(selected ? Color(nsColor: .controlBackgroundColor) : .clear)
+                        .shadow(color: selected ? .black.opacity(0.12) : .clear, radius: 1.5, y: 1)
+                )
+                .contentShape(Rectangle())
         }
-        return Calendar.current.date(byAdding: .day, value: pageOffset * step, to: Date()) ?? Date()
+        .buttonStyle(.plain)
     }
 
-    /// 翻页头的日期范围文案。
+    /// 当前页锚定的窗口末日：pageOffset 为 0 时是今天，每翻一页回退一个周期。
+    private var pageEndDay: Date {
+        Calendar.current.date(byAdding: .day, value: pageOffset * period.days, to: Date()) ?? Date()
+    }
+
+    /// 翻页头的日期范围文案：今日显示当天，近7天/近30天显示日期区间，近一年显示年月区间。
     private var pageRangeTitle: String {
         let cal = Calendar(identifier: .gregorian)
         let end = cal.startOfDay(for: pageEndDay)
@@ -243,18 +277,19 @@ struct TrendChartPager: View {
         case .today:
             return end.formatted(.dateTime.month(.wide).day().weekday(.abbreviated))
         case .last7, .last30:
-            let days = period == .last7 ? 7 : 30
-            let start = cal.date(byAdding: .day, value: -(days - 1), to: end) ?? end
+            let start = cal.date(byAdding: .day, value: -(period.days - 1), to: end) ?? end
             return "\(start.formatted(.dateTime.month(.wide).day())) – \(end.formatted(.dateTime.month(.wide).day()))"
+        case .last365:
+            let start = cal.date(byAdding: .day, value: -(period.days - 1), to: end) ?? end
+            return "\(start.formatted(.dateTime.year().month(.wide))) – \(end.formatted(.dateTime.year().month(.wide)))"
         }
     }
 
-    /// 当前页的厂商逐日序列（近 7 天曲线 / 近 30 天点阵共用）。
+    /// 当前页的厂商逐日序列（近 7 天 / 近 30 天曲线、近一年点阵共用）。
     private var pagedDailyTrends: [ProviderTrend] {
-        let days = period == .last7 ? 7 : 30
-        return kinds.compactMap { kind in
+        kinds.compactMap { kind in
             guard let result = UsageTrendData.daily(
-                kind: kind, days: days, endingOn: pageEndDay,
+                kind: kind, days: period.days, endingOn: pageEndDay,
                 snapshot: snapshot(kind)
             ) else { return nil }
             return ProviderTrend(kind: kind, days: result)
@@ -276,7 +311,7 @@ struct TrendChartPager: View {
     private var legendKinds: [ProviderKind] {
         switch period {
         case .today: return pagedHourlyTrends.map(\.kind)
-        case .last7, .last30: return pagedDailyTrends.map(\.kind)
+        case .last7, .last30, .last365: return pagedDailyTrends.map(\.kind)
         }
     }
 
@@ -309,14 +344,6 @@ struct CombinedTrendChart: View {
                         .foregroundStyle(by: .value("厂商", trend.kind.name))
                         .interpolationMethod(.catmullRom)
                         .lineStyle(StrokeStyle(lineWidth: 2))
-                        // 线下半透明面积填充，大窗口下视觉上更饱满
-                        AreaMark(
-                            x: .value("日期", item.day),
-                            y: .value("Tokens", item.tokens)
-                        )
-                        .foregroundStyle(by: .value("厂商", trend.kind.name))
-                        .interpolationMethod(.catmullRom)
-                        .opacity(0.08)
                         if hoverDay == item.day {
                             PointMark(
                                 x: .value("日期", item.day),
@@ -419,13 +446,6 @@ struct HourlyTrendChart: View {
                         .foregroundStyle(by: .value("厂商", trend.kind.name))
                         .interpolationMethod(.catmullRom)
                         .lineStyle(StrokeStyle(lineWidth: 2))
-                        AreaMark(
-                            x: .value("时间", item.hour),
-                            y: .value("Tokens", item.tokens)
-                        )
-                        .foregroundStyle(by: .value("厂商", trend.kind.name))
-                        .interpolationMethod(.catmullRom)
-                        .opacity(0.08)
                         if hoverHour == item.hour {
                             PointMark(
                                 x: .value("时间", item.hour),
@@ -508,17 +528,18 @@ struct HourlyTrendChart: View {
     }
 }
 
-/// 近 30 天点阵贡献图（GitHub 风格）：周一到周日七列、逐周一行，
+/// 近一年点阵贡献图（GitHub 风格）：七行为周一到周日、逐周一列，
 /// 颜色深浅表示当日各厂商 token 合计；悬停格子浮出气泡显示当日明细。
-/// 格子刻意做小（13pt），与曲线图同高，切换周期时窗口不抖动。
+/// 宽度超出可视区时横向滚动，默认滚到最新（右侧）。
 struct ContributionGrid: View {
     let trends: [ProviderTrend]
     @State private var hoverDay: Date?
-    @State private var hoverIndex = 0
+    @State private var hoverColumn = 0
 
-    private static let cellSize: CGFloat = 13
+    private static let cellSize: CGFloat = 10
     private static let cellSpacing: CGFloat = 3
-    private static let gridWidth = 7 * cellSize + 6 * cellSpacing
+    private static let columnWidth = cellSize + cellSpacing
+    private static let monthLabelHeight: CGFloat = 14
 
     /// 逐日合计（当日 00:00 → tokens）
     private var totals: [Date: Int] {
@@ -529,59 +550,101 @@ struct ContributionGrid: View {
         return result
     }
 
-    /// 日历网格单元（nil 为起始日所在周之前的占位空格），周一为每周第一天。
-    private var cells: [Date?] {
+    /// 逐周列：每列 7 个单元（周一到周日，nil 为首周起始日之前的占位空格）。
+    private var weeks: [[Date?]] {
         guard let days = trends.first?.days, !days.isEmpty else { return [] }
         let cal = Calendar(identifier: .gregorian)
         let weekday = cal.component(.weekday, from: days[0].day) // 周日=1 … 周六=7
         let leading = (weekday + 5) % 7 // 周一起点的偏移
-        return Array(repeating: nil, count: leading) + days.map { Optional($0.day) }
+        let cells = Array(repeating: nil, count: leading) + days.map { Optional($0.day) }
+        var result: [[Date?]] = []
+        for chunkStart in stride(from: 0, to: cells.count, by: 7) {
+            var week = Array(cells[chunkStart..<min(chunkStart + 7, cells.count)])
+            while week.count < 7 { week.append(nil) }
+            result.append(week)
+        }
+        return result
+    }
+
+    /// 月份标签：某列包含当月 1 号时，在该列上方显示月份。
+    private var monthLabels: [(column: Int, text: String)] {
+        let cal = Calendar(identifier: .gregorian)
+        return weeks.enumerated().compactMap { index, week in
+            for case let day? in week where cal.component(.day, from: day) == 1 {
+                return (index, day.formatted(.dateTime.month(.wide)))
+            }
+            return nil
+        }
     }
 
     var body: some View {
         let totals = self.totals
         let maxTokens = totals.values.max() ?? 0
-        let cells = self.cells
-        GeometryReader { geo in
-            LazyVGrid(
-                columns: Array(repeating: GridItem(.fixed(Self.cellSize), spacing: Self.cellSpacing), count: 7),
-                spacing: Self.cellSpacing
-            ) {
-                ForEach(Array(cells.enumerated()), id: \.offset) { index, cell in
-                    if let day = cell {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(color(for: totals[day] ?? 0, max: maxTokens))
-                            .frame(width: Self.cellSize, height: Self.cellSize)
-                            .onHover { hovering in
-                                if hovering {
-                                    hoverDay = day
-                                    hoverIndex = index
-                                } else if hoverDay == day {
-                                    hoverDay = nil
+        let weeks = self.weeks
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 4) {
+                    // 月份标签行
+                    ZStack(alignment: .topLeading) {
+                        Color.clear.frame(
+                            width: CGFloat(weeks.count) * Self.columnWidth,
+                            height: Self.monthLabelHeight
+                        )
+                        ForEach(monthLabels, id: \.column) { label in
+                            Text(label.text)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                                .offset(x: CGFloat(label.column) * Self.columnWidth)
+                        }
+                    }
+
+                    HStack(spacing: Self.cellSpacing) {
+                        ForEach(Array(weeks.enumerated()), id: \.offset) { column, week in
+                            VStack(spacing: Self.cellSpacing) {
+                                ForEach(Array(week.enumerated()), id: \.offset) { _, cell in
+                                    if let day = cell {
+                                        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                            .fill(color(for: totals[day] ?? 0, max: maxTokens))
+                                            .frame(width: Self.cellSize, height: Self.cellSize)
+                                            .onHover { hovering in
+                                                if hovering {
+                                                    hoverDay = day
+                                                    hoverColumn = column
+                                                } else if hoverDay == day {
+                                                    hoverDay = nil
+                                                }
+                                            }
+                                    } else {
+                                        Color.clear.frame(width: Self.cellSize, height: Self.cellSize)
+                                    }
                                 }
                             }
-                    } else {
-                        Color.clear.frame(width: Self.cellSize, height: Self.cellSize)
+                            .id(column)
+                        }
+                    }
+                }
+                .padding(.horizontal, 2)
+                .overlay(alignment: .topLeading) {
+                    if let hoverDay {
+                        tooltip(for: hoverDay)
+                            .offset(x: tooltipX, y: Self.monthLabelHeight + 4)
+                            .allowsHitTesting(false)
                     }
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .topLeading) {
-                if let hoverDay {
-                    tooltip(for: hoverDay)
-                        .offset(x: tooltipX(in: geo.size.width), y: 2)
-                        .allowsHitTesting(false)
-                }
+            .onAppear { proxy.scrollTo(weeks.count - 1, anchor: .trailing) }
+            .onChange(of: weeks.count) { _, count in
+                proxy.scrollTo(count - 1, anchor: .trailing)
             }
         }
+        .frame(maxHeight: .infinity)
     }
 
-    /// 气泡跟随悬停格子的列：格子中心水平对齐，并在图表区内钳制。
-    private func tooltipX(in width: CGFloat) -> CGFloat {
-        let originX = (width - Self.gridWidth) / 2
-        let column = hoverIndex % 7
-        let centerX = originX + CGFloat(column) * (Self.cellSize + Self.cellSpacing) + Self.cellSize / 2
-        return min(max(centerX - 61, 0), max(width - 122, 0))
+    /// 气泡跟随悬停格子的列：格子中心水平对齐，并在网格内钳制。
+    private var tooltipX: CGFloat {
+        let gridWidth = CGFloat(weeks.count) * Self.columnWidth
+        let centerX = CGFloat(hoverColumn) * Self.columnWidth + Self.cellSize / 2 + 2
+        return min(max(centerX - 61, 0), max(gridWidth - 122, 0))
     }
 
     private func color(for tokens: Int, max maxTokens: Int) -> Color {
