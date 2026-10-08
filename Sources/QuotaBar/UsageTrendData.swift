@@ -1,40 +1,50 @@
 import Foundation
 
-/// 趋势图翻页的数据入口（仅在视图主线程调用）。
+/// 趋势图翻页的数据入口。
 ///
 /// - Codex / Kimi Code：直接读本地日志，全历史可查、精确到小时；
 /// - DeepSeek：网页接口口径，快照中只有近 30 天逐日与今日逐小时，更早的窗口缺席；
 /// - 其余厂商：回退到采样序列（磁盘保留 45 天）。
-@MainActor
+///
+/// 日志解析量大（数百 MB），两个入口都是 async 且不在主线程执行文件 IO——
+/// 视图层用 .task 加载，绝不能回到在 body 里同步调用（冷扫描会卡死窗口打开）。
 enum UsageTrendData {
     /// 以 endDay 为最后一天（含）的逐日序列；该厂商在窗口内无任何数据时返回 nil。
     static func daily(kind: ProviderKind, days: Int, endingOn endDay: Date,
-                      snapshot: ProviderSnapshot?) -> [DailyTokenUsage]? {
+                      snapshot: ProviderSnapshot?) async -> [DailyTokenUsage]? {
         switch kind {
         case .codex:
-            let result = CodexLocalLogs.dailyTokens(sessionsRoot: codexSessions, days: days, now: endDay)
+            let result = await Task.detached {
+                CodexLocalLogs.dailyTokens(sessionsRoot: codexSessions, days: days, now: endDay)
+            }.value
             return result.contains(where: { $0.tokens > 0 }) ? result : nil
         case .kimi:
-            let result = KimiCodeLocalLogs.dailyTokens(sessionsRoot: kimiSessions, days: days, now: endDay)
+            let result = await Task.detached {
+                KimiCodeLocalLogs.dailyTokens(sessionsRoot: kimiSessions, days: days, now: endDay)
+            }.value
             return result.contains(where: { $0.tokens > 0 }) ? result : nil
         case .deepSeek:
             guard let daily = snapshot?.dailyTokens else { return nil }
             return slice(daily: daily, days: days, endingOn: endDay)
         case .claude:
             guard snapshot?.tokenUsage != nil else { return nil }
-            let result = UsageHistory.shared.dailyDeltas(kind: kind, key: "tokens", days: days, now: endDay)
+            let result = await UsageHistory.shared.dailyDeltas(kind: kind, key: "tokens", days: days, now: endDay)
             return result.contains(where: { $0.tokens > 0 }) ? result : nil
         }
     }
 
     /// 某天的逐小时序列；该厂商在该天无任何数据时返回 nil。
-    static func hourly(kind: ProviderKind, on day: Date, snapshot: ProviderSnapshot?) -> [HourlyTokenUsage]? {
+    static func hourly(kind: ProviderKind, on day: Date, snapshot: ProviderSnapshot?) async -> [HourlyTokenUsage]? {
         switch kind {
         case .codex:
-            let result = CodexLocalLogs.hourlyTokens(sessionsRoot: codexSessions, on: day)
+            let result = await Task.detached {
+                CodexLocalLogs.hourlyTokens(sessionsRoot: codexSessions, on: day)
+            }.value
             return result.contains(where: { $0.tokens > 0 }) ? result : nil
         case .kimi:
-            let result = KimiCodeLocalLogs.hourlyTokens(sessionsRoot: kimiSessions, on: day)
+            let result = await Task.detached {
+                KimiCodeLocalLogs.hourlyTokens(sessionsRoot: kimiSessions, on: day)
+            }.value
             return result.contains(where: { $0.tokens > 0 }) ? result : nil
         case .deepSeek:
             // 逐小时只在「今天」拉取（网页接口口径），历史日期没有数据

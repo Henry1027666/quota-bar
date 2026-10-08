@@ -93,6 +93,9 @@ struct ProviderSnapshot: Identifiable, Equatable, Sendable {
     /// 今日逐小时 token 用量（本地日志/逐小时接口精确统计，到当前小时为止）；
     /// 选中「今日用量」时的曲线图数据。
     var hourlyTokens: [HourlyTokenUsage]? = nil
+    /// 近一年 token 用量合计（本地日志厂商在 fetch 时后台精确统计；
+    /// DeepSeek 仅近 30 天有数，即近 30 天合计）。视图层直接读它，不在主线程现算。
+    var last365Tokens: Int? = nil
     var updatedAt: Date
     var message: String?
 

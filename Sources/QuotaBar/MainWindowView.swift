@@ -159,7 +159,8 @@ private struct OverviewView: View {
 
                 DetailCard {
                     TrendChartPager(kinds: scopedKinds, snapshot: { store.states[$0]?.snapshot },
-                                    chartHeight: 220, period: $chartPeriod)
+                                    chartHeight: 220, period: $chartPeriod,
+                                    reloadToken: store.lastRefreshedAt)
                 }
 
                 if let scope {

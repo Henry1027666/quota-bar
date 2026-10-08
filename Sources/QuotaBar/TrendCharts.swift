@@ -98,8 +98,12 @@ func tokenDeltas(kinds: [ProviderKind], states: [ProviderKind: ProviderState]) -
             last7 += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: last7Start, now: now) ?? 0)
             last30 += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: last30Start, now: now) ?? 0)
         }
-        if found, let year = UsageTrendData.daily(kind: kind, days: 365, endingOn: now, snapshot: snapshot) {
-            last365 += year.reduce(0) { $0 + $1.tokens }
+        if let year = snapshot.last365Tokens {
+            last365 += year
+        } else if snapshot.tokenUsage != nil {
+            // 采样兜底厂商无预计算年份值，历史采样序列为内存数据，直接求和
+            last365 += UsageHistory.shared.dailyDeltas(kind: kind, key: "tokens", days: 365, now: now)
+                .reduce(0) { $0 + $1.tokens }
         }
     }
     return found ? (today, last7, last30, last365) : nil
@@ -168,9 +172,14 @@ struct TrendChartPager: View {
     var chartHeight: CGFloat = 96
     /// 统计周期：由上方统计卡片驱动（点今日用量→今日曲线…）。
     @Binding var period: TrendPeriod
+    /// 刷新令牌（store.lastRefreshedAt）：快照更新后重新加载趋势。
+    var reloadToken: Date? = nil
 
     /// 图表翻页偏移：0 为当前周期，每翻一页回退一个周期（日/周/月/年随 period）。
     @State private var pageOffset = 0
+    /// nil = 加载中。趋势数据在后台线程解析（日志文件量大），加载期间显示占位。
+    @State private var dailyTrends: [ProviderTrend]?
+    @State private var hourlyTrends: [ProviderHourlyTrend]?
 
     var body: some View {
         VStack(spacing: 6) {
@@ -217,26 +226,66 @@ struct TrendChartPager: View {
             Group {
                 switch period {
                 case .today:
-                    if pagedHourlyTrends.isEmpty {
-                        chartPlaceholder("该日无逐小时用量数据")
+                    if let hourlyTrends {
+                        if hourlyTrends.isEmpty {
+                            chartPlaceholder("该日无逐小时用量数据")
+                        } else {
+                            HourlyTrendChart(trends: hourlyTrends)
+                        }
                     } else {
-                        HourlyTrendChart(trends: pagedHourlyTrends)
+                        chartPlaceholder("加载中…")
                     }
-                case .last7, .last30:
-                    if pagedDailyTrends.isEmpty {
-                        chartPlaceholder("该时段无用量数据")
+                case .last7, .last30, .last365:
+                    if let dailyTrends {
+                        if dailyTrends.isEmpty {
+                            chartPlaceholder("该时段无用量数据")
+                        } else if period == .last365 {
+                            ContributionGrid(trends: dailyTrends)
+                        } else {
+                            CombinedTrendChart(trends: dailyTrends)
+                        }
                     } else {
-                        CombinedTrendChart(trends: pagedDailyTrends)
-                    }
-                case .last365:
-                    if pagedDailyTrends.isEmpty {
-                        chartPlaceholder("该时段无用量数据")
-                    } else {
-                        ContributionGrid(trends: pagedDailyTrends)
+                        chartPlaceholder("加载中…")
                     }
                 }
             }
             .frame(height: chartHeight)
+        }
+        .task(id: reloadID) {
+            // 切周期/翻页时先置回加载态，避免旧数据在新口径下闪一帧
+            dailyTrends = nil
+            hourlyTrends = nil
+            await reload()
+        }
+    }
+
+    /// 触发趋势重载的条件组合：周期、页码、厂商范围、快照刷新时间。
+    private var reloadID: String {
+        "\(period.title)-\(pageOffset)-\(kinds.map(\.rawValue).joined())-\(reloadToken?.timeIntervalSince1970 ?? 0)"
+    }
+
+    /// 后台加载当前页的厂商趋势序列（UsageTrendData 内部已把文件 IO 放到非主线程）。
+    private func reload() async {
+        let end = pageEndDay
+        if period == .today {
+            let now = Date()
+            var result: [ProviderHourlyTrend] = []
+            for kind in kinds {
+                if let hours = await UsageTrendData.hourly(kind: kind, on: end, snapshot: snapshot(kind)) {
+                    result.append(ProviderHourlyTrend(kind: kind, hours: hours.filter { $0.hour <= now }))
+                }
+            }
+            hourlyTrends = result
+        } else {
+            var result: [ProviderTrend] = []
+            for kind in kinds {
+                if let days = await UsageTrendData.daily(
+                    kind: kind, days: period.days, endingOn: end, snapshot: snapshot(kind)
+                ) {
+                    result.append(ProviderTrend(kind: kind, days: days))
+                }
+            }
+            dailyTrends = result
         }
     }
 
@@ -261,33 +310,11 @@ struct TrendChartPager: View {
         }
     }
 
-    /// 当前页的厂商逐日序列（近 7 天 / 近 30 天曲线、近一年点阵共用）。
-    private var pagedDailyTrends: [ProviderTrend] {
-        kinds.compactMap { kind in
-            guard let result = UsageTrendData.daily(
-                kind: kind, days: period.days, endingOn: pageEndDay,
-                snapshot: snapshot(kind)
-            ) else { return nil }
-            return ProviderTrend(kind: kind, days: result)
-        }
-    }
-
-    /// 当前页的厂商逐小时序列（仅今日视图）；今天的序列截掉未来小时。
-    private var pagedHourlyTrends: [ProviderHourlyTrend] {
-        let now = Date()
-        return kinds.compactMap { kind in
-            guard let hours = UsageTrendData.hourly(
-                kind: kind, on: pageEndDay, snapshot: snapshot(kind)
-            ) else { return nil }
-            return ProviderHourlyTrend(kind: kind, hours: hours.filter { $0.hour <= now })
-        }
-    }
-
     /// 当前页实际有数据的厂商（图例行用）。
     private var legendKinds: [ProviderKind] {
         switch period {
-        case .today: return pagedHourlyTrends.map(\.kind)
-        case .last7, .last30, .last365: return pagedDailyTrends.map(\.kind)
+        case .today: return hourlyTrends?.map(\.kind) ?? []
+        case .last7, .last30, .last365: return dailyTrends?.map(\.kind) ?? []
         }
     }
 

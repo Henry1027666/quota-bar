@@ -110,8 +110,9 @@ struct KimiProvider: QuotaProvider {
         return exp - Date().timeIntervalSince1970 < 300
     }
 
-    /// Kimi 接口不返回 token 计数：改从本地会话日志精确统计（今日/本周/本月 + 近 7 天逐日）。
+    /// Kimi 接口不返回 token 计数：改从本地会话日志精确统计（今日/本周/本月 + 近 30 天逐日 + 近一年合计）。
     /// tokenUsage 展示今日值；tokenBreakdown 供趋势页三栏统计，dailyTokens 供趋势图使用。
+    /// fetch 在后台线程执行，365 天全量解析随快照缓存，视图层不再现算。
     private func withLocalTokenStats(_ snapshot: ProviderSnapshot) -> ProviderSnapshot {
         let root = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".kimi-code/sessions")
@@ -123,6 +124,8 @@ struct KimiProvider: QuotaProvider {
         result.tokenBreakdown = TokenBreakdown(today: totals.today, last7: totals.last7, last30: totals.last30)
         result.dailyTokens = daily
         result.hourlyTokens = KimiCodeLocalLogs.hourlyTokens(sessionsRoot: root)
+        result.last365Tokens = KimiCodeLocalLogs.dailyTokens(sessionsRoot: root, days: 365)
+            .reduce(0) { $0 + $1.tokens }
         return result
     }
 
@@ -355,6 +358,8 @@ struct DeepSeekProvider: QuotaProvider {
         snapshot.tokenBreakdown = tokenBreakdown
         snapshot.dailyTokens = dailyTokens
         snapshot.hourlyTokens = hourlyTokens
+        // 网页接口最多返回近 30 天，「近一年」口径下只覆盖这段（视图层与图表一致）
+        snapshot.last365Tokens = dailyTokens?.reduce(0) { $0 + $1.tokens }
         return snapshot
     }
 

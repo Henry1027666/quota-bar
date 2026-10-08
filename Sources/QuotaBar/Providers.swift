@@ -31,7 +31,9 @@ struct CodexProvider: QuotaProvider {
         }
 
         // Codex 接口不返回 token 计数：改从本地会话日志精确统计
-        // （今日/近7天/近30天 + 近 30 天逐日 + 今日逐小时）。
+        // （今日/近7天/近30天 + 近 30 天逐日 + 今日逐小时 + 近一年合计）。
+        // fetch 在后台线程执行，365 天的全量日志解析也在这里完成并随快照缓存，
+        // 视图层不再现算（主线程冷扫描数百 MB 日志会卡死窗口打开）。
         let sessions = home.appendingPathComponent("sessions")
         let totals = CodexLocalLogs.tokenTotals(sessionsRoot: sessions)
         let daily = CodexLocalLogs.dailyTokens(sessionsRoot: sessions, days: 30)
@@ -40,6 +42,8 @@ struct CodexProvider: QuotaProvider {
             result.tokenBreakdown = TokenBreakdown(today: totals.today, last7: totals.last7, last30: totals.last30)
             result.dailyTokens = daily
             result.hourlyTokens = CodexLocalLogs.hourlyTokens(sessionsRoot: sessions)
+            result.last365Tokens = CodexLocalLogs.dailyTokens(sessionsRoot: sessions, days: 365)
+                .reduce(0) { $0 + $1.tokens }
         }
         return result
     }
