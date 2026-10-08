@@ -30,6 +30,11 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
     /// 登录成功是否已通知（避免重复收割/通知）。
     private var didLogin = false
 
+    /// 登录窗口是否仍在显示（主窗口关闭时据此决定是否退回纯菜单栏模式）。
+    var isLoginWindowVisible: Bool { loginWindow?.isVisible ?? false }
+    /// 登录窗口关闭回调（AppDelegate 用于重估 Dock 激活策略）。
+    var onLoginWindowClosed: (() -> Void)?
+
     private enum Endpoint {
         static let summary = "/api/v0/users/get_user_summary"
         static let amount = "/api/v0/usage/by_api_key/amount"
@@ -221,6 +226,7 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         loginWebView = nil
         isLoginWindowLoading = false
         window.close()
+        onLoginWindowClosed?()
     }
 
     // MARK: - WKScriptMessageHandler（页面拦截脚本回传，用于判定登录完成）
@@ -276,6 +282,7 @@ final class DeepSeekWebSession: NSObject, WKScriptMessageHandler, WKNavigationDe
         loginWebView?.stopLoading()
         loginWebView = nil
         isLoginWindowLoading = false
+        onLoginWindowClosed?()
     }
 
     // MARK: - 私有

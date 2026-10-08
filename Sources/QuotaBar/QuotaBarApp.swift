@@ -6,6 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private let store = QuotaStore()
+    /// 主窗口控制器：首次打开时创建（避免启动即建窗），之后复用同一窗口。
+    private var mainWindowController: MainWindowController?
     private var activity: NSObjectProtocol?
     private var userRequestedQuit = false
 
@@ -20,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         startMemoryWatchdog()
 
-        // 菜单栏图标：左键打开额度面板，右键弹出「退出」菜单（面板内不设退出按钮）。
+        // 菜单栏图标：左键打开额度面板，右键弹出「打开 / 退出」菜单（面板内不设退出按钮）。
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         // macOS 会把 status item 的可见性按宿主持久化；一旦被系统/用户隐藏过，isVisible 会
         // 持续为 false 导致图标不出现。本应用全部 UI 就是这个图标，启动时强制置为可见。
@@ -38,14 +40,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 350, height: 620)
+        popover.contentSize = NSSize(width: 350, height: 420)
         let hosting = NSHostingController(
-            rootView: DashboardView(store: store) { [weak self] height in
-                self?.updatePopoverContentSize(height: height)
-            }
+            rootView: DashboardView(
+                store: store,
+                onContentHeightChange: { [weak self] height in
+                    self?.updatePopoverContentSize(height: height)
+                },
+                onOpenMainWindow: { [weak self] kind in
+                    self?.popover?.performClose(nil)
+                    self?.openMainWindow(selecting: kind)
+                }
+            )
         )
         popover.contentViewController = hosting
         self.popover = popover
+
+        // 主窗口先于 DeepSeek 登录窗口关闭时保持 .regular；登录窗口随后关闭时在这里补一次重估。
+        DeepSeekWebSession.shared.onLoginWindowClosed = { [weak self] in
+            self?.mainWindowController?.updateActivationPolicy()
+        }
 
         // 用户通过右键菜单“退出”时，先标记为显式退出，再发起 terminate。
         NotificationCenter.default.addObserver(
@@ -132,10 +146,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showQuitMenu(from button: NSStatusBarButton) {
         let menu = NSMenu()
+        let open = NSMenuItem(title: "打开 Quota Bar", action: #selector(openMainWindowFromMenu), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出 Quota Bar", action: #selector(quitFromMenu), keyEquivalent: "")
         quit.target = self
         menu.addItem(quit)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+    }
+
+    /// 打开主窗口（首次调用时创建控制器）；指定厂商时侧边栏定位到该厂商详情页。
+    private func openMainWindow(selecting kind: ProviderKind?) {
+        if mainWindowController == nil {
+            mainWindowController = MainWindowController(store: store)
+        }
+        mainWindowController?.open(selecting: kind)
+    }
+
+    @objc private func openMainWindowFromMenu() {
+        openMainWindow(selecting: nil)
     }
 
     @objc private func quitFromMenu() {

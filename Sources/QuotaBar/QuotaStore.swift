@@ -16,9 +16,27 @@ final class QuotaStore: ObservableObject {
         CodexProvider(), ClaudeProvider(), KimiProvider(), DeepSeekProvider()
     ]
 
+    /// 周期刷新任务句柄：设置页修改刷新频率后取消旧任务、按新间隔重启。
+    private var refreshTask: Task<Void, Never>?
+
     init() {
         // 应用常驻期间后台周期刷新，保证点开面板时数据基本是新鲜的，无需现场重新加载。
-        startPeriodicRefresh(interval: Self.defaultRefreshInterval)
+        startPeriodicRefresh(interval: Self.currentRefreshInterval)
+    }
+
+    /// 刷新间隔（分钟）的 UserDefaults 键，设置页 Picker 与本类共用。
+    nonisolated static let refreshIntervalKey = "refreshIntervalMinutes"
+
+    /// 当前生效的刷新间隔：读 UserDefaults（默认 5 分钟），非法值回退默认。
+    nonisolated static var currentRefreshInterval: TimeInterval {
+        let minutes = UserDefaults.standard.integer(forKey: refreshIntervalKey)
+        return TimeInterval((minutes > 0 ? minutes : 5) * 60)
+    }
+
+    /// 设置页修改刷新频率后调用：持久化并重启周期任务使新间隔生效。
+    func updateRefreshInterval(minutes: Int) {
+        UserDefaults.standard.set(minutes, forKey: Self.refreshIntervalKey)
+        startPeriodicRefresh(interval: Self.currentRefreshInterval)
     }
 
     /// 刷新入口。
@@ -61,7 +79,8 @@ final class QuotaStore: ObservableObject {
 
     /// 后台周期刷新：每次间隔后强制刷新一次，保证面板打开时展示的是近期数据。
     private func startPeriodicRefresh(interval: TimeInterval) {
-        Task { [weak self] in
+        refreshTask?.cancel()
+        refreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard let self else { return }
