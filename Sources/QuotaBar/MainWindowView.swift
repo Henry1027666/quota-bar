@@ -9,7 +9,7 @@ enum SidebarItem: Hashable {
     case settings
 }
 
-/// 主窗口：NavigationSplitView 侧边栏布局，承载从弹层搬来的图表与明细。
+/// 主窗口：NavigationSplitView 侧边栏布局。总览下挂各厂商详情页，设置独立在底部。
 struct MainWindowView: View {
     @ObservedObject var store: QuotaStore
     @ObservedObject var selection: MainWindowSelection
@@ -18,20 +18,32 @@ struct MainWindowView: View {
         NavigationSplitView {
             List(selection: $selection.item) {
                 Label("总览", systemImage: "chart.line.uptrend.xyaxis")
+                    .font(.system(size: 13, weight: .medium))
                     .tag(SidebarItem.overview)
-                Section("厂商") {
-                    ForEach(ProviderKind.allCases) { kind in
-                        // 未检测到的厂商也列出但灰显，保持侧边栏条目稳定不跳动
-                        let detected: Bool = {
-                            if case .notDetected = store.states[kind] { return false }
-                            return true
-                        }()
-                        Label(kind.name, systemImage: kind.symbol)
+
+                // 厂商作为总览的下级条目缩进排列；未检测到的灰显但保留，条目不跳动
+                ForEach(ProviderKind.allCases) { kind in
+                    let detected: Bool = {
+                        if case .notDetected = store.states[kind] { return false }
+                        return true
+                    }()
+                    HStack(spacing: 7) {
+                        Image(systemName: kind.symbol)
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(detected ? kind.tint : .secondary)
-                            .tag(SidebarItem.provider(kind))
+                            .frame(width: 16)
+                        Text(kind.name)
+                            .font(.system(size: 12))
+                            .foregroundStyle(detected ? .primary : .secondary)
                     }
+                    .padding(.leading, 16)
+                    .tag(SidebarItem.provider(kind))
                 }
+
+                Divider().opacity(0.4).padding(.vertical, 2)
+
                 Label("设置", systemImage: "gearshape")
+                    .font(.system(size: 13, weight: .medium))
                     .tag(SidebarItem.settings)
             }
             .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
@@ -49,7 +61,33 @@ struct MainWindowView: View {
     }
 }
 
-/// 总览页：三个大数字卡片（今日/近7天/近30天）+ 大号趋势图翻页器。
+/// 详情页通用卡片容器：圆角浅底 + 内边距，标题小字置顶。
+private struct DetailCard<Content: View>: View {
+    let title: String?
+    @ViewBuilder let content: Content
+
+    init(_ title: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let title {
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+            }
+            content
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+/// 总览页：三个大数字卡片 + 卡片化的趋势图翻页器。
 private struct OverviewView: View {
     @ObservedObject var store: QuotaStore
 
@@ -59,7 +97,7 @@ private struct OverviewView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 if let deltas = tokenDeltas(kinds: kinds, states: store.states) {
                     HStack(spacing: 12) {
                         bigStat(title: "今日用量", value: deltas.today)
@@ -67,7 +105,9 @@ private struct OverviewView: View {
                         bigStat(title: "近30天用量", value: deltas.last30)
                     }
                 }
-                TrendChartPager(kinds: kinds, snapshot: { store.states[$0]?.snapshot }, chartHeight: 220)
+                DetailCard("用量趋势") {
+                    TrendChartPager(kinds: kinds, snapshot: { store.states[$0]?.snapshot }, chartHeight: 220)
+                }
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -76,22 +116,24 @@ private struct OverviewView: View {
     }
 
     private func bigStat(title: String, value: Int) -> some View {
-        VStack(spacing: 4) {
-            Text(value.formatted(.number.notation(.compactName)))
-                .font(.system(size: 28, weight: .semibold))
-                .monospacedDigit()
+        VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.caption)
+                .fontWeight(.medium)
                 .foregroundStyle(.secondary)
+            Text(value.formatted(.number.notation(.compactName)))
+                .font(.system(size: 26, weight: .semibold))
+                .monospacedDigit()
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 14)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
-/// 厂商详情页：头部（图标/名称+官网链接/plan·account）、全部配额窗口进度条、余额分组行、
-/// 该厂商单独的逐日曲线（30 天）与今日逐小时曲线、DeepSeek 登录入口、错误/提示信息。
+/// 厂商详情页：头部（图标/名称+官网链接/plan·account）、token 周期统计、配额窗口卡片、
+/// 余额卡片、逐日/逐小时用量曲线卡片、DeepSeek 登录入口、错误/提示信息。
 private struct ProviderDetailView: View {
     let kind: ProviderKind
     let state: ProviderState
@@ -99,7 +141,7 @@ private struct ProviderDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 header
 
                 switch state {
@@ -131,8 +173,8 @@ private struct ProviderDetailView: View {
             Image(systemName: kind.symbol)
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(kind.tint)
-                .frame(width: 40, height: 40)
-                .background(kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .frame(width: 42, height: 42)
+                .background(kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
                 Button {
                     if let url = kind.website { NSWorkspace.shared.open(url) }
@@ -161,35 +203,44 @@ private struct ProviderDetailView: View {
 
     @ViewBuilder
     private func readyContent(_ snapshot: ProviderSnapshot) -> some View {
+        if let breakdown = snapshot.tokenBreakdown {
+            HStack(spacing: 12) {
+                miniStat(title: "今日", value: breakdown.today)
+                miniStat(title: "近7天", value: breakdown.last7)
+                miniStat(title: "近30天", value: breakdown.last30)
+            }
+        }
+
         if !snapshot.windows.isEmpty {
-            VStack(spacing: 10) {
-                ForEach(snapshot.windows) { window in
-                    QuotaRow(window: window, tint: kind.tint)
+            DetailCard("配额") {
+                VStack(spacing: 10) {
+                    ForEach(snapshot.windows) { window in
+                        QuotaRow(window: window, tint: kind.tint)
+                    }
                 }
             }
         }
 
         let balances = displayBalances(kind: kind, snapshot: snapshot)
         if !balances.isEmpty {
-            VStack(spacing: 4) {
-                ForEach(balances, id: \.label) { group in
-                    HStack {
-                        Text(group.label).foregroundStyle(.secondary)
-                        Spacer()
-                        Text(group.text)
-                            .monospacedDigit()
-                            .fontWeight(.medium)
+            DetailCard("余额与消费") {
+                VStack(spacing: 6) {
+                    ForEach(balances, id: \.label) { group in
+                        HStack {
+                            Text(group.label).foregroundStyle(.secondary)
+                            Spacer()
+                            Text(group.text)
+                                .monospacedDigit()
+                                .fontWeight(.medium)
+                        }
+                        .font(.callout)
                     }
-                    .font(.callout)
                 }
             }
         }
 
         if let daily = UsageTrendData.daily(kind: kind, days: 30, endingOn: Date(), snapshot: snapshot) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("近 30 天逐日用量")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            DetailCard("近 30 天逐日用量") {
                 CombinedTrendChart(trends: [ProviderTrend(kind: kind, days: daily)])
                     .frame(height: 160)
             }
@@ -198,10 +249,7 @@ private struct ProviderDetailView: View {
         if let hourly = UsageTrendData.hourly(kind: kind, on: Date(), snapshot: snapshot) {
             let hours = hourly.filter { $0.hour <= Date() }
             if !hours.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("今日逐小时用量")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                DetailCard("今日逐小时用量") {
                     HourlyTrendChart(trends: [ProviderHourlyTrend(kind: kind, hours: hours)])
                         .frame(height: 160)
                 }
@@ -227,6 +275,21 @@ private struct ProviderDetailView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func miniStat(title: String, value: Int) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value.formatted(.number.notation(.compactName)))
+                .font(.system(size: 18, weight: .semibold))
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -274,6 +337,7 @@ private struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
+        .frame(maxWidth: 560)
         .navigationTitle("设置")
     }
 

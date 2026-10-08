@@ -184,6 +184,21 @@ struct TrendChartPager: View {
                 .opacity(pageOffset == 0 ? 0.25 : 1)
             }
 
+            // 自定义图例：彩色圆点 + 厂商名（图表内自动图例已隐藏）
+            if !legendKinds.isEmpty {
+                HStack(spacing: 12) {
+                    ForEach(legendKinds) { kind in
+                        HStack(spacing: 4) {
+                            Circle().fill(kind.tint).frame(width: 6, height: 6)
+                            Text(kind.name)
+                        }
+                    }
+                    Spacer()
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+
             Group {
                 switch period {
                 case .today:
@@ -257,6 +272,14 @@ struct TrendChartPager: View {
         }
     }
 
+    /// 当前页实际有数据的厂商（图例行用）。
+    private var legendKinds: [ProviderKind] {
+        switch period {
+        case .today: return pagedHourlyTrends.map(\.kind)
+        case .last7, .last30: return pagedDailyTrends.map(\.kind)
+        }
+    }
+
     private func chartPlaceholder(_ text: String) -> some View {
         Text(text)
             .font(.caption2)
@@ -285,7 +308,15 @@ struct CombinedTrendChart: View {
                         // 不分系列时所有 LineMark 会被连成一条折线，跨厂商首尾相接成对角线锯齿
                         .foregroundStyle(by: .value("厂商", trend.kind.name))
                         .interpolationMethod(.catmullRom)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                        // 线下半透明面积填充，大窗口下视觉上更饱满
+                        AreaMark(
+                            x: .value("日期", item.day),
+                            y: .value("Tokens", item.tokens)
+                        )
+                        .foregroundStyle(by: .value("厂商", trend.kind.name))
+                        .interpolationMethod(.catmullRom)
+                        .opacity(0.08)
                         if hoverDay == item.day {
                             PointMark(
                                 x: .value("日期", item.day),
@@ -302,6 +333,8 @@ struct CombinedTrendChart: View {
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 }
             }
+            // 图例由 TrendChartPager 头部的彩色圆点行替代，自动图例孤立在图下方很突兀
+            .chartLegend(.hidden)
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
             .chartForegroundStyleScale(
@@ -385,7 +418,14 @@ struct HourlyTrendChart: View {
                         )
                         .foregroundStyle(by: .value("厂商", trend.kind.name))
                         .interpolationMethod(.catmullRom)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                        AreaMark(
+                            x: .value("时间", item.hour),
+                            y: .value("Tokens", item.tokens)
+                        )
+                        .foregroundStyle(by: .value("厂商", trend.kind.name))
+                        .interpolationMethod(.catmullRom)
+                        .opacity(0.08)
                         if hoverHour == item.hour {
                             PointMark(
                                 x: .value("时间", item.hour),
@@ -402,6 +442,7 @@ struct HourlyTrendChart: View {
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 }
             }
+            .chartLegend(.hidden)
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
             .chartForegroundStyleScale(
