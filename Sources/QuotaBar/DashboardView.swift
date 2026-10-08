@@ -358,6 +358,8 @@ private struct CombinedTrendChart: View {
                             x: .value("日期", item.day),
                             y: .value("Tokens", item.tokens)
                         )
+                        // 必须显式声明 series：否则所有 LineMark 会被连成一条折线，跨厂商首尾相接
+                        .series(by: .value("厂商", trend.kind.name))
                         .foregroundStyle(trend.kind.tint)
                         .interpolationMethod(.catmullRom)
                         .lineStyle(StrokeStyle(lineWidth: 1.5))
