@@ -72,17 +72,19 @@ func sortedVisibleKinds(states: [ProviderKind: ProviderState]) -> [ProviderKind]
     }
 }
 
-/// 各厂商 Token 计数器在今日 / 近 7 天 / 近 30 天（滚动窗口，含今天）内的用量之和；
+/// 各厂商 Token 计数器在今日 / 近 7 天 / 近 30 天 / 近一年（滚动窗口，含今天）内的用量之和；
 /// 无任何厂商返回 token 用量时为 nil。有精确分解（本地日志 / 逐日接口）的厂商用精确值，
 /// 其余用采样增量估算。弹层顶部三栏与主窗口总览大数字卡片共用。
+/// 近一年经 UsageTrendData 全历史逐日序列求和（本地日志厂商为精确值；DeepSeek 仅近 30 天有数，
+/// 采样兜底仅保留 45 天，更早窗口计 0）。
 @MainActor
-func tokenDeltas(kinds: [ProviderKind], states: [ProviderKind: ProviderState]) -> (today: Int, last7: Int, last30: Int)? {
+func tokenDeltas(kinds: [ProviderKind], states: [ProviderKind: ProviderState]) -> (today: Int, last7: Int, last30: Int, last365: Int)? {
     let now = Date()
     let cal = Calendar(identifier: .gregorian)
     let dayStart = cal.startOfDay(for: now)
     let last7Start = cal.date(byAdding: .day, value: -6, to: dayStart) ?? dayStart
     let last30Start = cal.date(byAdding: .day, value: -29, to: dayStart) ?? dayStart
-    var today = 0, last7 = 0, last30 = 0, found = false
+    var today = 0, last7 = 0, last30 = 0, last365 = 0, found = false
     for kind in kinds {
         guard case .ready(let snapshot) = states[kind] else { continue }
         if let breakdown = snapshot.tokenBreakdown {
@@ -96,8 +98,11 @@ func tokenDeltas(kinds: [ProviderKind], states: [ProviderKind: ProviderState]) -
             last7 += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: last7Start, now: now) ?? 0)
             last30 += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: last30Start, now: now) ?? 0)
         }
+        if found, let year = UsageTrendData.daily(kind: kind, days: 365, endingOn: now, snapshot: snapshot) {
+            last365 += year.reduce(0) { $0 + $1.tokens }
+        }
     }
-    return found ? (today, last7, last30) : nil
+    return found ? (today, last7, last30, last365) : nil
 }
 
 /// 卡片/详情页展示的余额行：DeepSeek 隐藏「近30天消费」；同名行（如 API 余额的 CNY/USD 两条）
@@ -154,32 +159,23 @@ struct QuotaRow: View {
     }
 }
 
-/// 趋势图翻页器：周期切换（今日/近7天/近30天/近一年）+ ‹ 日期范围 › 翻页头 + 固定高度图表区，
-/// 切换周期或翻页时窗口不抖动。主窗口总览页使用。
+/// 趋势图翻页器：周期由外部（统计卡片）选择，本组件只留 ‹ 日期范围 › 翻页头 +
+/// 固定高度图表区，切换周期或翻页时窗口不抖动。主窗口总览页使用。
 struct TrendChartPager: View {
     let kinds: [ProviderKind]
     /// 取厂商最新快照（UsageTrendData 需要快照里的逐日/逐小时精确数据）。
     let snapshot: (ProviderKind) -> ProviderSnapshot?
     var chartHeight: CGFloat = 96
+    /// 统计周期：由上方统计卡片驱动（点今日用量→今日曲线…）。
+    @Binding var period: TrendPeriod
 
-    @State private var period: TrendPeriod = .today
     /// 图表翻页偏移：0 为当前周期，每翻一页回退一个周期（日/周/月/年随 period）。
     @State private var pageOffset = 0
 
     var body: some View {
         VStack(spacing: 6) {
             HStack(spacing: 6) {
-                // 自绘胶囊 tab：系统 segmented Picker 在 macOS 26 上会画出容器外（选中胶囊溢出左边界）
-                HStack(spacing: 2) {
-                    ForEach(TrendPeriod.allCases, id: \.title) { p in
-                        periodTab(p)
-                    }
-                }
-                .padding(2)
-                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-
                 Spacer()
-
                 Button { pageOffset -= 1 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 10, weight: .semibold))
@@ -201,6 +197,7 @@ struct TrendChartPager: View {
                 .disabled(pageOffset == 0)
                 .opacity(pageOffset == 0 ? 0.25 : 1)
             }
+            .onChange(of: period) { _, _ in pageOffset = 0 }
 
             // 自定义图例：彩色圆点 + 厂商名（图表内自动图例已隐藏）
             if !legendKinds.isEmpty {
@@ -241,27 +238,6 @@ struct TrendChartPager: View {
             }
             .frame(height: chartHeight)
         }
-    }
-
-    private func periodTab(_ p: TrendPeriod) -> some View {
-        let selected = period == p
-        return Button {
-            period = p
-            pageOffset = 0
-        } label: {
-            Text(p.title)
-                .font(.system(size: 12, weight: selected ? .semibold : .regular))
-                .foregroundStyle(selected ? .primary : .secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(selected ? Color(nsColor: .controlBackgroundColor) : .clear)
-                        .shadow(color: selected ? .black.opacity(0.12) : .clear, radius: 1.5, y: 1)
-                )
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     /// 当前页锚定的窗口末日：pageOffset 为 0 时是今天，每翻一页回退一个周期。

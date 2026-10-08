@@ -126,6 +126,8 @@ private struct DetailCard<Content: View>: View {
 private struct OverviewView: View {
     @ObservedObject var store: QuotaStore
     @ObservedObject var selection: MainWindowSelection
+    /// 图表统计周期：由统计卡片点击驱动，默认近一年（年度点阵图）。
+    @State private var chartPeriod: TrendPeriod = .last365
 
     private var visibleKinds: [ProviderKind] {
         sortedVisibleKinds(states: store.states)
@@ -148,14 +150,16 @@ private struct OverviewView: View {
 
                 if let deltas = tokenDeltas(kinds: scopedKinds, states: store.states) {
                     HStack(spacing: 12) {
-                        bigStat(title: "今日用量", value: deltas.today)
-                        bigStat(title: "近7天用量", value: deltas.last7)
-                        bigStat(title: "近30天用量", value: deltas.last30)
+                        bigStat(title: "今日用量", value: deltas.today, period: .today)
+                        bigStat(title: "近7天用量", value: deltas.last7, period: .last7)
+                        bigStat(title: "近30天用量", value: deltas.last30, period: .last30)
+                        bigStat(title: "近一年用量", value: deltas.last365, period: .last365)
                     }
                 }
 
                 DetailCard {
-                    TrendChartPager(kinds: scopedKinds, snapshot: { store.states[$0]?.snapshot }, chartHeight: 220)
+                    TrendChartPager(kinds: scopedKinds, snapshot: { store.states[$0]?.snapshot },
+                                    chartHeight: 220, period: $chartPeriod)
                 }
 
                 if let scope {
@@ -290,20 +294,33 @@ private struct OverviewView: View {
         }
     }
 
-    private func bigStat(title: String, value: Int) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption)
-                .fontWeight(.medium)
-                .foregroundStyle(.secondary)
-            Text(value.formatted(.number.notation(.compactName)))
-                .font(.system(size: 26, weight: .semibold))
-                .monospacedDigit()
+    /// 统计卡：同时是图表周期切换器，选中卡带品牌色描边。
+    private func bigStat(title: String, value: Int, period: TrendPeriod) -> some View {
+        let selected = chartPeriod == period
+        return Button {
+            chartPeriod = period
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+                Text(value.formatted(.number.notation(.compactName)))
+                    .font(.system(size: 26, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(selected ? 0.6 : 0), lineWidth: 1.5)
+            )
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .buttonStyle(.plain)
     }
 }
 
