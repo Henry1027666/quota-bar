@@ -34,6 +34,8 @@ private struct VisualEffectBackground: NSViewRepresentable {
 struct DashboardView: View {
     @ObservedObject var store: QuotaStore
     @State private var refreshHovered = false
+    /// 顶部统计选中的统计周期，下方趋势图随之切换。
+    @State private var period: TrendPeriod = .today
     /// 内容高度变化回调：AppDelegate 据此更新 popover 尺寸，实现窗口随条目自适应。
     var onContentHeightChange: ((CGFloat) -> Void)?
 
@@ -129,14 +131,27 @@ struct DashboardView: View {
         if deltas != nil || !trends.isEmpty {
             VStack(spacing: 8) {
                 if let deltas {
-                    HStack(spacing: 0) {
-                        tokenStat(title: "今日用量", value: deltas.today)
-                        tokenStat(title: "近7天用量", value: deltas.last7)
-                        tokenStat(title: "近30天用量", value: deltas.last30)
+                    HStack(spacing: 4) {
+                        periodStat(title: "今日用量", value: deltas.today, period: .today)
+                        periodStat(title: "近7天用量", value: deltas.last7, period: .last7)
+                        periodStat(title: "近30天用量", value: deltas.last30, period: .last30)
                     }
                 }
                 if !trends.isEmpty {
-                    CombinedTrendChart(trends: trends)
+                    switch period {
+                    case .today:
+                        if hourlyTrends.isEmpty {
+                            chartPlaceholder("今日尚无逐小时用量数据")
+                        } else {
+                            HourlyTrendChart(trends: hourlyTrends)
+                        }
+                    case .last7:
+                        CombinedTrendChart(
+                            trends: trends.map { ProviderTrend(kind: $0.kind, days: Array($0.days.suffix(7))) }
+                        )
+                    case .last30:
+                        ContributionGrid(trends: trends)
+                    }
                 }
             }
             .padding(.bottom, 6)
@@ -145,7 +160,7 @@ struct DashboardView: View {
         }
     }
 
-    /// 参与综合趋势图的厂商序列：有本地日志/逐日接口数据的用逐日精确值，
+    /// 参与趋势图的厂商逐日序列（近 30 天）：有本地日志/逐日接口数据的用逐日精确值，
     /// 其余有 token 计数器的用采样按日增量估算；完全没有 token 数据的不参与。
     private var trends: [ProviderTrend] {
         sortedKinds.compactMap { kind in
@@ -154,21 +169,48 @@ struct DashboardView: View {
                 return ProviderTrend(kind: kind, days: daily)
             }
             guard snapshot.tokenUsage != nil else { return nil }
-            let days = UsageHistory.shared.dailyDeltas(kind: kind, key: "tokens", days: 7)
+            let days = UsageHistory.shared.dailyDeltas(kind: kind, key: "tokens", days: 30)
             return days.contains(where: { $0.tokens > 0 }) ? ProviderTrend(kind: kind, days: days) : nil
         }
     }
 
-    private func tokenStat(title: String, value: Int) -> some View {
-        VStack(spacing: 2) {
-            Text(value.formatted(.number.notation(.compactName)))
-                .font(.system(size: 15, weight: .semibold))
-                .monospacedDigit()
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+    /// 参与今日逐小时曲线的厂商序列（本地日志 / 逐小时接口精确值）；截掉未来小时。
+    private var hourlyTrends: [ProviderHourlyTrend] {
+        let now = Date()
+        return sortedKinds.compactMap { kind in
+            guard case .ready(let snapshot) = store.states[kind],
+                  let hourly = snapshot.hourlyTokens, !hourly.isEmpty else { return nil }
+            return ProviderHourlyTrend(kind: kind, hours: hourly.filter { $0.hour <= now })
         }
-        .frame(maxWidth: .infinity)
+    }
+
+    /// 顶部统计项：同时是趋势图周期切换按钮，选中项带浅色底。
+    private func periodStat(title: String, value: Int, period: TrendPeriod) -> some View {
+        Button { self.period = period } label: {
+            VStack(spacing: 2) {
+                Text(value.formatted(.number.notation(.compactName)))
+                    .font(.system(size: 15, weight: .semibold))
+                    .monospacedDigit()
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(self.period == period ? Color.primary.opacity(0.08) : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func chartPlaceholder(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, minHeight: 90)
     }
 
     private var footer: some View {
@@ -444,6 +486,201 @@ private struct CombinedTrendChart: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(.secondary.opacity(0.2), lineWidth: 0.5)
         )
+    }
+}
+
+/// 顶部统计切换的统计周期。
+private enum TrendPeriod {
+    case today, last7, last30
+}
+
+/// 一个厂商的今日逐小时 token 序列（逐小时曲线图用）。
+private struct ProviderHourlyTrend: Identifiable {
+    let kind: ProviderKind
+    let hours: [HourlyTokenUsage]
+
+    var id: ProviderKind { kind }
+}
+
+/// 今日逐小时用量曲线：每家厂商一条彩色平滑曲线；悬停显示参考线与该小时各厂商用量气泡。
+private struct HourlyTrendChart: View {
+    let trends: [ProviderHourlyTrend]
+    @State private var hoverHour: Date?
+    @State private var hoverX: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { geo in
+            Chart {
+                ForEach(trends) { trend in
+                    ForEach(trend.hours, id: \.hour) { item in
+                        LineMark(
+                            x: .value("时间", item.hour),
+                            y: .value("Tokens", item.tokens)
+                        )
+                        .foregroundStyle(by: .value("厂商", trend.kind.name))
+                        .interpolationMethod(.catmullRom)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        if hoverHour == item.hour {
+                            PointMark(
+                                x: .value("时间", item.hour),
+                                y: .value("Tokens", item.tokens)
+                            )
+                            .foregroundStyle(by: .value("厂商", trend.kind.name))
+                            .symbolSize(24)
+                        }
+                    }
+                }
+                if let hoverHour {
+                    RuleMark(x: .value("时间", hoverHour))
+                        .foregroundStyle(.secondary.opacity(0.4))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                }
+            }
+            .chartXAxis(.hidden)
+            .chartYAxis(.hidden)
+            .chartForegroundStyleScale(
+                domain: trends.map { $0.kind.name },
+                range: trends.map { $0.kind.tint }
+            )
+            .chartOverlay { proxy in
+                Rectangle().fill(.clear).contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            hoverX = location.x
+                            // 坐标轴全部隐藏，绘图区与 overlay 同原点同尺寸，直接用 location.x 反解时间
+                            if let date: Date = proxy.value(atX: location.x) {
+                                hoverHour = nearestHour(to: date)
+                            }
+                        case .ended:
+                            hoverHour = nil
+                        }
+                    }
+            }
+            .overlay(alignment: .topLeading) {
+                if let hoverHour {
+                    tooltip(for: hoverHour)
+                        .offset(x: min(max(hoverX - 60, 0), max(geo.size.width - 122, 0)), y: 0)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .frame(height: 90)
+    }
+
+    private func nearestHour(to date: Date) -> Date? {
+        trends.first?.hours.min(by: {
+            abs($0.hour.timeIntervalSince(date)) < abs($1.hour.timeIntervalSince(date))
+        })?.hour
+    }
+
+    private func tooltip(for hour: Date) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(hour.formatted(.dateTime.month(.wide).day().hour()))
+                .fontWeight(.semibold)
+            ForEach(trends) { trend in
+                HStack(spacing: 4) {
+                    Circle().fill(trend.kind.tint).frame(width: 5, height: 5)
+                    Text(trend.kind.name)
+                    Spacer()
+                    Text((trend.hours.first { $0.hour == hour }?.tokens ?? 0)
+                        .formatted(.number.notation(.compactName)))
+                        .monospacedDigit()
+                }
+            }
+        }
+        .font(.caption2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(width: 122)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.secondary.opacity(0.2), lineWidth: 0.5)
+        )
+    }
+}
+
+/// 近 30 天点阵贡献图（GitHub 风格）：周一到周日七列、逐周一行，
+/// 颜色深浅表示当日各厂商 token 合计；悬停格子时底部说明行切换为当日明细。
+private struct ContributionGrid: View {
+    let trends: [ProviderTrend]
+    @State private var hoverDay: Date?
+
+    private static let cellSize: CGFloat = 26
+    private static let cellSpacing: CGFloat = 4
+
+    /// 逐日合计（当日 00:00 → tokens）
+    private var totals: [Date: Int] {
+        var result: [Date: Int] = [:]
+        for trend in trends {
+            for item in trend.days { result[item.day, default: 0] += item.tokens }
+        }
+        return result
+    }
+
+    /// 日历网格单元（nil 为起始日所在周之前的占位空格），周一为每周第一天。
+    private var cells: [Date?] {
+        guard let days = trends.first?.days, !days.isEmpty else { return [] }
+        let cal = Calendar(identifier: .gregorian)
+        let weekday = cal.component(.weekday, from: days[0].day) // 周日=1 … 周六=7
+        let leading = (weekday + 5) % 7 // 周一起点的偏移
+        return Array(repeating: nil, count: leading) + days.map { Optional($0.day) }
+    }
+
+    var body: some View {
+        let totals = self.totals
+        let maxTokens = totals.values.max() ?? 0
+        VStack(spacing: 6) {
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.fixed(Self.cellSize), spacing: Self.cellSpacing), count: 7),
+                spacing: Self.cellSpacing
+            ) {
+                ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                    if let day = cell {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(color(for: totals[day] ?? 0, max: maxTokens))
+                            .frame(width: Self.cellSize, height: Self.cellSize)
+                            .onHover { hovering in
+                                if hovering { hoverDay = day } else if hoverDay == day { hoverDay = nil }
+                            }
+                    } else {
+                        Color.clear.frame(width: Self.cellSize, height: Self.cellSize)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            if let hoverDay {
+                Text(hoverCaption(for: hoverDay))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            } else if let first = trends.first?.days.first?.day, let last = trends.first?.days.last?.day {
+                Text("\(first.formatted(.dateTime.month(.wide).day())) – \(last.formatted(.dateTime.month(.wide).day())) · 每格一天")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func color(for tokens: Int, max maxTokens: Int) -> Color {
+        guard tokens > 0, maxTokens > 0 else { return Color.primary.opacity(0.05) }
+        switch Double(tokens) / Double(maxTokens) {
+        case ..<0.25: return .accentColor.opacity(0.25)
+        case ..<0.5: return .accentColor.opacity(0.45)
+        case ..<0.75: return .accentColor.opacity(0.7)
+        default: return .accentColor
+        }
+    }
+
+    /// 悬停明细：日期 + 各厂商当日用量。
+    private func hoverCaption(for day: Date) -> String {
+        let parts = trends.map { trend in
+            let tokens = trend.days.first { $0.day == day }?.tokens ?? 0
+            return "\(trend.kind.name) \(tokens.formatted(.number.notation(.compactName)))"
+        }
+        return "\(day.formatted(.dateTime.month(.wide).day().weekday(.abbreviated))) · \(parts.joined(separator: " · "))"
     }
 }
 

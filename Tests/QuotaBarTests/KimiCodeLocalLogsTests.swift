@@ -69,3 +69,37 @@ import Testing
 
     try FileManager.default.removeItem(at: root)
 }
+
+@Test func kimiCodeLocalLogsHourlyTokens() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("kimi-hourly-\(UUID().uuidString)")
+    let sessions = root.appendingPathComponent("sessions")
+    let cal = Calendar(identifier: .gregorian)
+    let now = Date()
+    let dayStart = cal.startOfDay(for: now)
+    let currentHour = cal.component(.hour, from: now)
+
+    // 同一 agent 的多条记录必须写在同一个 wire.jsonl 里（append），不同 agent 各自一个文件
+    func write(hours: [(tokens: Int, hour: Int)], agent: String) throws {
+        let dir = sessions.appendingPathComponent("wd_h/s_\(agent)/agents/\(agent)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let text = hours.map { tokens, hour in
+            let ms = Int(dayStart.addingTimeInterval(TimeInterval(hour * 3600 + 60)).timeIntervalSince1970 * 1000)
+            return """
+            {"type":"usage.record","agentId":"\(agent)","model":"k","usage":{"inputOther":\(tokens),"output":0,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":\(ms)}
+            """
+        }.joined(separator: "\n")
+        try text.write(to: dir.appendingPathComponent("wire.jsonl"), atomically: true, encoding: .utf8)
+    }
+
+    try write(hours: [(100, 0), (200, 1)], agent: "main")
+    try write(hours: [(300, 1)], agent: "agent-1")
+
+    let hourly = KimiCodeLocalLogs.hourlyTokens(sessionsRoot: sessions, now: now)
+    #expect(hourly.count == currentHour + 1)          // 今天只到当前小时
+    #expect(hourly[0].tokens == 100)
+    #expect(hourly[1].tokens == 500)                   // 跨 agent 同小时合并
+    #expect(hourly.allSatisfy { cal.component(.minute, from: $0.hour) == 0 })
+
+    try FileManager.default.removeItem(at: root)
+}

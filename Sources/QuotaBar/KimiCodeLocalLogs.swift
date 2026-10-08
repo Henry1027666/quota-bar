@@ -6,12 +6,12 @@ import Foundation
 /// Kimi 的用量接口只返回窗口百分比、不返回 token 计数；但每个 agent 的事件日志中
 /// 每轮对话都会产生一条 `usage.record`（`usageScope == "turn"`），含
 /// inputOther / inputCacheRead / inputCacheCreation / output 四项精确计数与毫秒时间戳。
-/// 按事件时间归并到本地自然日，即可得出今日/本周/本月用量。
+/// 按事件时间归并到本地自然小时，即可得出逐小时 / 逐日 / 今日 / 近 7 天 / 近 30 天用量。
 ///
 /// 注意：
 /// - 子 agent 的用量只记录在自己的 wire.jsonl 里，需遍历 agents 下所有目录。
 /// - `usageScope == "session"` 是累计快照，必须排除，否则会与 turn 记录重复计数。
-/// - wire.jsonl 只增不改，mtime 早于本月起点的文件不可能含本月记录，直接跳过。
+/// - wire.jsonl 只增不改，mtime 早于统计窗口起点的文件不可能含窗口内记录，直接跳过。
 ///   其余文件按 mtime+size 做内存缓存，未变化不重读。
 enum KimiCodeLocalLogs {
     struct TokenTotals: Equatable, Sendable {
@@ -20,13 +20,19 @@ enum KimiCodeLocalLogs {
         var last30 = 0
     }
 
-    /// path → (mtime, size, 每日 token 数)
-    private nonisolated(unsafe) static var cache: [String: (mtime: Date, size: UInt64, perDay: [String: Int])] = [:]
+    /// path → (mtime, size, 每小时 token 数)
+    private nonisolated(unsafe) static var cache: [String: (mtime: Date, size: UInt64, perHour: [String: Int])] = [:]
     private static let lock = NSLock()
 
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static let hourFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH"
         return f
     }()
 
@@ -42,7 +48,8 @@ enum KimiCodeLocalLogs {
 
         var totals = TokenTotals()
         for file in wireFiles(sessionsRoot: sessionsRoot, modifiedSince: last30Start) {
-            for (day, tokens) in perDayTokens(file) {
+            for (hourKey, tokens) in perHourTokens(file) {
+                let day = String(hourKey.prefix(10))
                 if day >= last30Key { totals.last30 += tokens }
                 if day >= last7Key { totals.last7 += tokens }
                 if day == todayKey { totals.today += tokens }
@@ -53,21 +60,44 @@ enum KimiCodeLocalLogs {
 
     /// 最近 days 天（含今天）的逐日 token 数，按本地自然日升序，无记录的日期为 0。
     static func dailyTokens(sessionsRoot: URL, days: Int, now: Date = Date()) -> [DailyTokenUsage] {
-        var cal = Calendar(identifier: .gregorian)
-        cal.firstWeekday = 2
+        let cal = Calendar(identifier: .gregorian)
         let dayStart = cal.startOfDay(for: now)
         guard let firstDay = cal.date(byAdding: .day, value: -(days - 1), to: dayStart) else { return [] }
         let firstKey = dayFormatter.string(from: firstDay)
 
         var perDay: [String: Int] = [:]
         for file in wireFiles(sessionsRoot: sessionsRoot, modifiedSince: firstDay) {
-            for (day, tokens) in perDayTokens(file) where day >= firstKey {
+            for (hourKey, tokens) in perHourTokens(file) {
+                let day = String(hourKey.prefix(10))
+                guard day >= firstKey else { continue }
                 perDay[day, default: 0] += tokens
             }
         }
         return (0..<days).compactMap { offset in
             guard let day = cal.date(byAdding: .day, value: offset, to: firstDay) else { return nil }
             return DailyTokenUsage(day: day, tokens: perDay[dayFormatter.string(from: day)] ?? 0)
+        }
+    }
+
+    /// 某天（默认今天）的逐小时 token 用量；今天只返回到当前小时，历史日期返回完整 24 小时。
+    static func hourlyTokens(sessionsRoot: URL, on day: Date = Date(), now: Date = Date()) -> [HourlyTokenUsage] {
+        let cal = Calendar(identifier: .gregorian)
+        let dayStart = cal.startOfDay(for: day)
+        let dayKey = dayFormatter.string(from: dayStart)
+        let isToday = dayKey == dayFormatter.string(from: now)
+        let lastHour = isToday ? cal.component(.hour, from: now) : 23
+
+        var perHour: [Int: Int] = [:]
+        for file in wireFiles(sessionsRoot: sessionsRoot, modifiedSince: dayStart) {
+            for (key, tokens) in perHourTokens(file) where key.hasPrefix(dayKey) {
+                guard let hour = Int(key.suffix(2)) else { continue }
+                perHour[hour, default: 0] += tokens
+            }
+        }
+        return (0...lastHour).compactMap { hour in
+            cal.date(byAdding: .hour, value: hour, to: dayStart).map {
+                HourlyTokenUsage(hour: $0, tokens: perHour[hour] ?? 0)
+            }
         }
     }
 
@@ -87,19 +117,19 @@ enum KimiCodeLocalLogs {
         return files
     }
 
-    /// 单文件的每日 token 数（day → tokens），带 mtime+size 缓存。
-    private static func perDayTokens(_ url: URL) -> [String: Int] {
+    /// 单文件的每小时 token 数（"yyyy-MM-dd HH" → tokens），带 mtime+size 缓存。
+    private static func perHourTokens(_ url: URL) -> [String: Int] {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let mtime = attrs[.modificationDate] as? Date,
               let size = attrs[.size] as? UInt64 else { return [:] }
         lock.lock()
         if let cached = cache[url.path], cached.mtime == mtime, cached.size == size {
             lock.unlock()
-            return cached.perDay
+            return cached.perHour
         }
         lock.unlock()
 
-        var perDay: [String: Int] = [:]
+        var perHour: [String: Int] = [:]
         if let text = try? String(contentsOf: url, encoding: .utf8) {
             for line in text.split(separator: "\n", omittingEmptySubsequences: true)
             where line.contains("\"type\":\"usage.record\"") && line.contains("\"usageScope\":\"turn\"") {
@@ -109,14 +139,14 @@ enum KimiCodeLocalLogs {
                       let ms = Support.number(event["time"]) else { continue }
                 let tokens = ["inputOther", "inputCacheRead", "inputCacheCreation", "output"]
                     .reduce(0.0) { $0 + (Support.number(usage[$1]) ?? 0) }
-                let day = dayFormatter.string(from: Date(timeIntervalSince1970: ms / 1000))
-                perDay[day, default: 0] += Int(tokens)
+                let hour = hourFormatter.string(from: Date(timeIntervalSince1970: ms / 1000))
+                perHour[hour, default: 0] += Int(tokens)
             }
         }
 
         lock.lock()
-        cache[url.path] = (mtime, size, perDay)
+        cache[url.path] = (mtime, size, perHour)
         lock.unlock()
-        return perDay
+        return perHour
     }
 }

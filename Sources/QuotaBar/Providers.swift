@@ -30,15 +30,16 @@ struct CodexProvider: QuotaProvider {
             throw QuotaError.notAuthenticated("未检测到 Codex 登录")
         }
 
-        // Codex 接口不返回 token 计数：改从本地会话日志精确统计（今日/近7天/近30天 + 近 7 天逐日）。
-        // tokenUsage 展示今日值；tokenBreakdown 供顶部三栏统计，dailyTokens 供综合趋势图使用。
+        // Codex 接口不返回 token 计数：改从本地会话日志精确统计
+        // （今日/近7天/近30天 + 近 30 天逐日 + 今日逐小时）。
         let sessions = home.appendingPathComponent("sessions")
         let totals = CodexLocalLogs.tokenTotals(sessionsRoot: sessions)
-        let daily = CodexLocalLogs.dailyTokens(sessionsRoot: sessions, days: 7)
+        let daily = CodexLocalLogs.dailyTokens(sessionsRoot: sessions, days: 30)
         if totals.last30 > 0 || daily.contains(where: { $0.tokens > 0 }) {
             result.tokenUsage = totals.today
             result.tokenBreakdown = TokenBreakdown(today: totals.today, last7: totals.last7, last30: totals.last30)
             result.dailyTokens = daily
+            result.hourlyTokens = CodexLocalLogs.hourlyTokens(sessionsRoot: sessions)
         }
         return result
     }

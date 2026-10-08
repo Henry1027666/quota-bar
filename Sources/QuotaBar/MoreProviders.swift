@@ -116,12 +116,13 @@ struct KimiProvider: QuotaProvider {
         let root = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".kimi-code/sessions")
         let totals = KimiCodeLocalLogs.tokenTotals(sessionsRoot: root)
-        let daily = KimiCodeLocalLogs.dailyTokens(sessionsRoot: root, days: 7)
+        let daily = KimiCodeLocalLogs.dailyTokens(sessionsRoot: root, days: 30)
         guard totals.last30 > 0 || daily.contains(where: { $0.tokens > 0 }) else { return snapshot }
         var result = snapshot
         result.tokenUsage = totals.today
         result.tokenBreakdown = TokenBreakdown(today: totals.today, last7: totals.last7, last30: totals.last30)
         result.dailyTokens = daily
+        result.hourlyTokens = KimiCodeLocalLogs.hourlyTokens(sessionsRoot: root)
         return result
     }
 
@@ -310,6 +311,7 @@ struct DeepSeekProvider: QuotaProvider {
         var requestCount: Int?
         var tokenBreakdown: TokenBreakdown?
         var dailyTokens: [DailyTokenUsage]?
+        var hourlyTokens: [HourlyTokenUsage]?
         var message: String?
         if let webToken = discoverWebToken() {
             Log.append("DS", "发现网页会话 token (前缀 \(webToken.prefix(12))…)，拉取用量接口")
@@ -317,13 +319,16 @@ struct DeepSeekProvider: QuotaProvider {
             do {
                 let web = try await fetchWebUsage(bearer: webToken)
                 applyWeb(web, to: &balances, &tokenUsage, &requestCount)
-                // amount 接口返回近 30 天逐日 bucket：卡片展示今日值，
-                // 并补齐精确周期分解（今日/近7天/近30天）与近 7 天逐日趋势。
+                // amount 接口返回近 30 天逐日 bucket + 今日逐小时 bucket：
+                // 卡片展示今日值，并补齐精确周期分解与逐日/逐小时趋势。
                 if !web.dailyTokens.isEmpty {
                     let stats = Self.periodStats(web.dailyTokens)
                     tokenUsage = stats.today
                     tokenBreakdown = stats.breakdown
                     dailyTokens = stats.daily
+                }
+                if !web.hourlyTokens.isEmpty {
+                    hourlyTokens = web.hourlyTokens
                 }
                 Log.append("DS", "用量接口成功: balances=\(web.balances.count) tokens=\(String(describing: web.tokenUsage)) req=\(String(describing: web.requestCount))")
                 if web.isEmpty { message = "网页用量接口未返回数据" }
@@ -349,6 +354,7 @@ struct DeepSeekProvider: QuotaProvider {
         )
         snapshot.tokenBreakdown = tokenBreakdown
         snapshot.dailyTokens = dailyTokens
+        snapshot.hourlyTokens = hourlyTokens
         return snapshot
     }
 
@@ -371,6 +377,8 @@ struct DeepSeekProvider: QuotaProvider {
         var requestCount: Int?
         /// 逐日 token 数（东八区 "yyyy-MM-dd" → tokens），来自 amount 接口的逐日 bucket。
         var dailyTokens: [String: Int] = [:]
+        /// 今日逐小时 token 数（范围缩到一天时 amount 接口自动返回 3600s bucket，实测）。
+        var hourlyTokens: [HourlyTokenUsage] = []
         var isEmpty: Bool { balances.isEmpty && tokenUsage == nil && requestCount == nil }
     }
 
@@ -452,6 +460,11 @@ struct DeepSeekProvider: QuotaProvider {
         try ensureWebSuccess(cost)
         Self.parseCost(cost, into: &result, todayStart: range.end - 86400)
 
+        // 4) 今日逐小时用量：范围缩到一天时接口自动返回 3600s 逐小时 bucket（实测）
+        let hourly = try await get(URL(string: "\(base)/usage/by_api_key/amount?start=\(Int(range.end - 86400))&end=\(Int(range.end))&tz=\(tz)")!)
+        try ensureWebSuccess(hourly)
+        Self.parseHourly(hourly, into: &result)
+
         return result
     }
 
@@ -495,6 +508,27 @@ struct DeepSeekProvider: QuotaProvider {
         result.tokenUsage = tokens
     }
 
+    /// by_api_key/amount 的今日范围响应（bucket=3600）：逐小时 token 数。
+    /// bucket.time 是东八区整点 epoch，直接作为该小时的起始时刻。
+    private static func parseHourly(_ json: Any, into result: inout WebUsage) {
+        guard let biz = bizData(json),
+              let series = biz["series"] as? [[String: Any]] else { return }
+        var perHour: [Int: Int] = [:]
+        for item in series {
+            for bucket in (item["buckets"] as? [[String: Any]] ?? []) {
+                guard let usage = bucket["usage"] as? [String: Any],
+                      let t = Support.firstNumber(in: bucket, keys: ["time"]) else { continue }
+                let tokens = Int(Support.firstNumber(in: usage, keys: ["PROMPT_CACHE_HIT_TOKEN"]) ?? 0)
+                    + Int(Support.firstNumber(in: usage, keys: ["PROMPT_CACHE_MISS_TOKEN"]) ?? 0)
+                    + Int(Support.firstNumber(in: usage, keys: ["RESPONSE_TOKEN", "COMPLETION_TOKEN"]) ?? 0)
+                perHour[Int(t), default: 0] += tokens
+            }
+        }
+        result.hourlyTokens = perHour.keys.sorted().map {
+            HourlyTokenUsage(hour: Date(timeIntervalSince1970: TimeInterval($0)), tokens: perHour[$0] ?? 0)
+        }
+    }
+
     /// bucket 日期口径：接口按 tz=28800 逐日分桶，day key 统一用东八区格式化。
     private static let dayKeyFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -523,8 +557,8 @@ struct DeepSeekProvider: QuotaProvider {
             if day >= last7Key { last7 += tokens }
             if day == todayKey { today += tokens }
         }
-        let firstDay = cal.date(byAdding: .day, value: -6, to: dayStart) ?? dayStart
-        let daily = (0..<7).compactMap { offset -> DailyTokenUsage? in
+        let firstDay = cal.date(byAdding: .day, value: -29, to: dayStart) ?? dayStart
+        let daily = (0..<30).compactMap { offset -> DailyTokenUsage? in
             guard let day = cal.date(byAdding: .day, value: offset, to: firstDay) else { return nil }
             return DailyTokenUsage(day: day, tokens: dailyTokens[dayKeyFormatter.string(from: day)] ?? 0)
         }

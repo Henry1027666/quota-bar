@@ -111,9 +111,9 @@ import Testing
     #expect(stats.today == 100)
     #expect(stats.breakdown.last7 == 100)
     #expect(stats.breakdown.last30 == 150)
-    #expect(stats.daily.count == 7)
+    #expect(stats.daily.count == 30)
     #expect(stats.daily.last?.tokens == 100)
-    #expect(stats.daily.reduce(0) { $0 + $1.tokens } == 100)
+    #expect(stats.daily.reduce(0) { $0 + $1.tokens } == 150)   // 8 天前的 50 也在近 30 天窗口内
 }
 
 /// 东八区 "yyyy-MM-dd"，与 DeepSeekProvider 的 bucket day key 口径一致。
