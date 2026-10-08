@@ -358,9 +358,9 @@ private struct CombinedTrendChart: View {
                             x: .value("日期", item.day),
                             y: .value("Tokens", item.tokens)
                         )
-                        // 必须显式声明 series：否则所有 LineMark 会被连成一条折线，跨厂商首尾相接
-                        .series(by: .value("厂商", trend.kind.name))
-                        .foregroundStyle(trend.kind.tint)
+                        // 用 foregroundStyle(by:) 按厂商分系列（颜色由 chartForegroundStyleScale 指定）：
+                        // 不分系列时所有 LineMark 会被连成一条折线，跨厂商首尾相接成对角线锯齿
+                        .foregroundStyle(by: .value("厂商", trend.kind.name))
                         .interpolationMethod(.catmullRom)
                         .lineStyle(StrokeStyle(lineWidth: 1.5))
                         if hoverDay == item.day {
@@ -368,7 +368,7 @@ private struct CombinedTrendChart: View {
                                 x: .value("日期", item.day),
                                 y: .value("Tokens", item.tokens)
                             )
-                            .foregroundStyle(trend.kind.tint)
+                            .foregroundStyle(by: .value("厂商", trend.kind.name))
                             .symbolSize(24)
                         }
                     }
@@ -381,6 +381,10 @@ private struct CombinedTrendChart: View {
             }
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
+            .chartForegroundStyleScale(
+                domain: trends.map { $0.kind.name },
+                range: trends.map { $0.kind.tint }
+            )
             .chartOverlay { proxy in
                 Rectangle().fill(.clear).contentShape(Rectangle())
                     .onContinuousHover { phase in
