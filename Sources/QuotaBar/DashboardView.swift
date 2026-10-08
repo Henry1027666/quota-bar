@@ -122,15 +122,38 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var summarySection: some View {
-        if let deltas = tokenDeltas {
-            HStack(spacing: 0) {
-                tokenStat(title: "今日用量", value: deltas.today)
-                tokenStat(title: "本周用量", value: deltas.week)
-                tokenStat(title: "本月用量", value: deltas.month)
+        let deltas = tokenDeltas
+        let trends = trends
+        if deltas != nil || !trends.isEmpty {
+            VStack(spacing: 8) {
+                if let deltas {
+                    HStack(spacing: 0) {
+                        tokenStat(title: "今日用量", value: deltas.today)
+                        tokenStat(title: "本周用量", value: deltas.week)
+                        tokenStat(title: "本月用量", value: deltas.month)
+                    }
+                }
+                if !trends.isEmpty {
+                    CombinedTrendChart(trends: trends)
+                }
             }
             .padding(.bottom, 6)
 
             Divider().opacity(0.35)
+        }
+    }
+
+    /// 参与综合趋势图的厂商序列：有本地日志/逐日接口数据的用逐日精确值，
+    /// 其余有 token 计数器的用采样按日增量估算；完全没有 token 数据的不参与。
+    private var trends: [ProviderTrend] {
+        sortedKinds.compactMap { kind in
+            guard case .ready(let snapshot) = store.states[kind] else { return nil }
+            if let daily = snapshot.dailyTokens {
+                return ProviderTrend(kind: kind, days: daily)
+            }
+            guard snapshot.tokenUsage != nil else { return nil }
+            let days = UsageHistory.shared.dailyDeltas(kind: kind, key: "tokens", days: 7)
+            return days.contains(where: { $0.tokens > 0 }) ? ProviderTrend(kind: kind, days: days) : nil
         }
     }
 
@@ -174,18 +197,6 @@ private struct ProviderCard: View {
     let kind: ProviderKind
     let state: ProviderState
     @State private var nameHovered = false
-
-    /// 卡片迷你趋势的近 7 天逐日序列：本地日志精确值优先，采样增量估算兜底；
-    /// 7 天全为 0 时不展示。
-    private var trendDays: [DailyTokenUsage]? {
-        guard case .ready(let snapshot) = state else { return nil }
-        if let daily = snapshot.dailyTokens {
-            return daily.contains(where: { $0.tokens > 0 }) ? daily : nil
-        }
-        guard snapshot.tokenUsage != nil else { return nil }
-        let days = UsageHistory.shared.dailyDeltas(kind: snapshot.kind, key: "tokens", days: 7)
-        return days.contains(where: { $0.tokens > 0 }) ? days : nil
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -240,9 +251,6 @@ private struct ProviderCard: View {
                             .font(.caption)
                         }
                     }
-                }
-                if let days = trendDays {
-                    MiniTrend(days: days, tint: kind.tint)
                 }
                 if kind == .deepSeek, snapshot.tokenUsage == nil, snapshot.requestCount == nil {
                     Button {
@@ -326,40 +334,47 @@ private struct ProviderCard: View {
     }
 }
 
-/// 卡片底部的近 7 天逐日用量迷你趋势：平滑曲线 + 浅渐变面积，无坐标轴，右端为今天。
-/// 鼠标悬停时显示参考线、端点圆点，并在上方浮出「日期 · 当日用量」气泡。
-private struct MiniTrend: View {
+/// 一个厂商的近 7 天逐日 token 序列（综合趋势图用）。
+private struct ProviderTrend: Identifiable {
+    let kind: ProviderKind
     let days: [DailyTokenUsage]
-    let tint: Color
-    @State private var hoverDay: DailyTokenUsage?
+
+    var id: ProviderKind { kind }
+}
+
+/// 顶部三栏统计下方的近 7 天综合用量曲线：每家厂商一条彩色平滑曲线，无坐标轴，右端为今天。
+/// 鼠标悬停时显示垂直参考线，并浮出气泡列出当天各厂商用量。
+private struct CombinedTrendChart: View {
+    let trends: [ProviderTrend]
+    @State private var hoverDay: Date?
     @State private var hoverX: CGFloat = 0
 
     var body: some View {
         GeometryReader { geo in
-            Chart(days, id: \.day) { item in
-                LineMark(
-                    x: .value("日期", item.day),
-                    y: .value("Tokens", item.tokens)
-                )
-                .foregroundStyle(tint)
-                .interpolationMethod(.catmullRom)
-                .lineStyle(StrokeStyle(lineWidth: 1.5))
-                AreaMark(
-                    x: .value("日期", item.day),
-                    y: .value("Tokens", item.tokens)
-                )
-                .foregroundStyle(tint.opacity(0.12))
-                .interpolationMethod(.catmullRom)
-                if hoverDay?.day == item.day {
-                    RuleMark(x: .value("日期", item.day))
-                        .foregroundStyle(tint.opacity(0.35))
+            Chart {
+                ForEach(trends) { trend in
+                    ForEach(trend.days, id: \.day) { item in
+                        LineMark(
+                            x: .value("日期", item.day),
+                            y: .value("Tokens", item.tokens)
+                        )
+                        .foregroundStyle(trend.kind.tint)
+                        .interpolationMethod(.catmullRom)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        if hoverDay == item.day {
+                            PointMark(
+                                x: .value("日期", item.day),
+                                y: .value("Tokens", item.tokens)
+                            )
+                            .foregroundStyle(trend.kind.tint)
+                            .symbolSize(24)
+                        }
+                    }
+                }
+                if let hoverDay {
+                    RuleMark(x: .value("日期", hoverDay))
+                        .foregroundStyle(.secondary.opacity(0.4))
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                    PointMark(
-                        x: .value("日期", item.day),
-                        y: .value("Tokens", item.tokens)
-                    )
-                    .foregroundStyle(tint)
-                    .symbolSize(28)
                 }
             }
             .chartXAxis(.hidden)
@@ -372,9 +387,7 @@ private struct MiniTrend: View {
                             hoverX = location.x
                             // 坐标轴全部隐藏，绘图区与 overlay 同原点同尺寸，直接用 location.x 反解日期
                             if let date: Date = proxy.value(atX: location.x) {
-                                hoverDay = days.min(by: {
-                                    abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date))
-                                })
+                                hoverDay = nearestDay(to: date)
                             }
                         case .ended:
                             hoverDay = nil
@@ -383,19 +396,46 @@ private struct MiniTrend: View {
             }
             .overlay(alignment: .topLeading) {
                 if let hoverDay {
-                    Text("\(hoverDay.day.formatted(.dateTime.month(.wide).day().weekday(.abbreviated))) · \(hoverDay.tokens.formatted(.number.notation(.compactName)))")
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(.regularMaterial, in: Capsule())
-                        .overlay(Capsule().strokeBorder(tint.opacity(0.3), lineWidth: 0.5))
-                        .offset(x: min(max(hoverX - 50, 0), max(geo.size.width - 100, 0)), y: -18)
+                    tooltip(for: hoverDay)
+                        .offset(x: min(max(hoverX - 60, 0), max(geo.size.width - 122, 0)), y: 0)
                         .allowsHitTesting(false)
                 }
             }
         }
-        .frame(height: 26)
+        .frame(height: 90)
+    }
+
+    /// 各厂商序列共享同一组自然日，用第一条序列找离鼠标最近的一天。
+    private func nearestDay(to date: Date) -> Date? {
+        trends.first?.days.min(by: {
+            abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date))
+        })?.day
+    }
+
+    private func tooltip(for day: Date) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(day.formatted(.dateTime.month(.wide).day().weekday(.abbreviated)))
+                .fontWeight(.semibold)
+            ForEach(trends) { trend in
+                HStack(spacing: 4) {
+                    Circle().fill(trend.kind.tint).frame(width: 5, height: 5)
+                    Text(trend.kind.name)
+                    Spacer()
+                    Text((trend.days.first { $0.day == day }?.tokens ?? 0)
+                        .formatted(.number.notation(.compactName)))
+                        .monospacedDigit()
+                }
+            }
+        }
+        .font(.caption2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(width: 122)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.secondary.opacity(0.2), lineWidth: 0.5)
+        )
     }
 }
 
