@@ -112,11 +112,11 @@ struct ProviderSnapshot: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Token 用量按自然周期的分解：今日 / 本周（周一起）/ 本月。
+/// Token 用量按滚动周期的分解：今日 / 近 7 天 / 近 30 天（均含今天）。
 struct TokenBreakdown: Equatable, Sendable {
     let today: Int
-    let week: Int
-    let month: Int
+    let last7: Int
+    let last30: Int
 }
 
 /// 某自然日的 token 用量（本地日志精确统计）。

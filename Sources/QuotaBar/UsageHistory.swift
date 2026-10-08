@@ -11,7 +11,7 @@ final class UsageHistory {
 
     static let shared = UsageHistory()
 
-    /// 磁盘保留 45 天（「本月用量」需要月初基线）。
+    /// 磁盘保留 45 天（「近30天用量」需要 30 天前的基线采样点）。
     static let retention: TimeInterval = 45 * 86400
     static let displayWindow: TimeInterval = 7 * 86400
     /// 单条序列的最大采样点数（超出丢最旧），防止长期运行文件膨胀。

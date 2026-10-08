@@ -117,10 +117,10 @@ struct KimiProvider: QuotaProvider {
             .appendingPathComponent(".kimi-code/sessions")
         let totals = KimiCodeLocalLogs.tokenTotals(sessionsRoot: root)
         let daily = KimiCodeLocalLogs.dailyTokens(sessionsRoot: root, days: 7)
-        guard totals.month > 0 || daily.contains(where: { $0.tokens > 0 }) else { return snapshot }
+        guard totals.last30 > 0 || daily.contains(where: { $0.tokens > 0 }) else { return snapshot }
         var result = snapshot
         result.tokenUsage = totals.today
-        result.tokenBreakdown = TokenBreakdown(today: totals.today, week: totals.week, month: totals.month)
+        result.tokenBreakdown = TokenBreakdown(today: totals.today, last7: totals.last7, last30: totals.last30)
         result.dailyTokens = daily
         return result
     }
@@ -317,9 +317,8 @@ struct DeepSeekProvider: QuotaProvider {
             do {
                 let web = try await fetchWebUsage(bearer: webToken)
                 applyWeb(web, to: &balances, &tokenUsage, &requestCount)
-                // amount 接口返回近 30 天逐日 bucket：卡片改为展示今日值，
-                // 并补齐精确周期分解（今日/本周/本月）与近 7 天逐日趋势。
-                // 注：bucket 仅覆盖近 30 天，每月 31 号时「本月」可能缺 1 号一天。
+                // amount 接口返回近 30 天逐日 bucket：卡片展示今日值，
+                // 并补齐精确周期分解（今日/近7天/近30天）与近 7 天逐日趋势。
                 if !web.dailyTokens.isEmpty {
                     let stats = Self.periodStats(web.dailyTokens)
                     tokenUsage = stats.today
@@ -504,24 +503,24 @@ struct DeepSeekProvider: QuotaProvider {
         return f
     }()
 
-    /// 从逐日 token 表（东八区 day key）得出 今日/本周（周一起）/本月 合计与近 7 天逐日序列。
+    /// 从逐日 token 表（东八区 day key）得出 今日 / 近 7 天 / 近 30 天（滚动窗口，含今天）
+    /// 合计与近 7 天逐日序列。bucket 覆盖正好就是近 30 天，与滚动口径完全对齐。
     static func periodStats(
         _ dailyTokens: [String: Int], now: Date = Date()
     ) -> (today: Int, breakdown: TokenBreakdown, daily: [DailyTokenUsage]) {
         var cal = Calendar(identifier: .gregorian)
-        cal.firstWeekday = 2
         cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
         let dayStart = cal.startOfDay(for: now)
-        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
-        let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
+        let last7Start = cal.date(byAdding: .day, value: -6, to: dayStart) ?? dayStart
+        let last30Start = cal.date(byAdding: .day, value: -29, to: dayStart) ?? dayStart
         let todayKey = dayKeyFormatter.string(from: dayStart)
-        let weekKey = dayKeyFormatter.string(from: weekStart)
-        let monthKey = dayKeyFormatter.string(from: monthStart)
+        let last7Key = dayKeyFormatter.string(from: last7Start)
+        let last30Key = dayKeyFormatter.string(from: last30Start)
 
-        var today = 0, week = 0, month = 0
+        var today = 0, last7 = 0, last30 = 0
         for (day, tokens) in dailyTokens {
-            if day >= monthKey { month += tokens }
-            if day >= weekKey { week += tokens }
+            if day >= last30Key { last30 += tokens }
+            if day >= last7Key { last7 += tokens }
             if day == todayKey { today += tokens }
         }
         let firstDay = cal.date(byAdding: .day, value: -6, to: dayStart) ?? dayStart
@@ -529,7 +528,7 @@ struct DeepSeekProvider: QuotaProvider {
             guard let day = cal.date(byAdding: .day, value: offset, to: firstDay) else { return nil }
             return DailyTokenUsage(day: day, tokens: dailyTokens[dayKeyFormatter.string(from: day)] ?? 0)
         }
-        return (today, TokenBreakdown(today: today, week: week, month: month), daily)
+        return (today, TokenBreakdown(today: today, last7: last7, last30: last30), daily)
     }
 
     /// by_api_key/cost：data[].series[].buckets[].cost 逐日求和（今日消费 + 近 30 天消费）。

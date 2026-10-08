@@ -10,8 +10,8 @@ import Foundation
 enum CodexLocalLogs {
     struct TokenTotals: Equatable, Sendable {
         var today = 0
-        var week = 0
-        var month = 0
+        var last7 = 0
+        var last30 = 0
     }
 
     /// path → (mtime, size, 每日 token 数)
@@ -24,22 +24,21 @@ enum CodexLocalLogs {
         return f
     }()
 
-    /// 统计今日/本周（周一起）/本月的 token 用量。sessionsRoot 为 ~/.codex/sessions。
+    /// 统计今日 / 近 7 天 / 近 30 天（滚动窗口，均含今天）的 token 用量。sessionsRoot 为 ~/.codex/sessions。
     static func tokenTotals(sessionsRoot: URL, now: Date = Date()) -> TokenTotals {
-        var cal = Calendar(identifier: .gregorian)
-        cal.firstWeekday = 2
+        let cal = Calendar(identifier: .gregorian)
         let dayStart = cal.startOfDay(for: now)
-        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
-        let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
-        let monthStartKey = dayFormatter.string(from: monthStart)
-        let weekStartKey = dayFormatter.string(from: weekStart)
+        let last7Start = cal.date(byAdding: .day, value: -6, to: dayStart) ?? dayStart
+        let last30Start = cal.date(byAdding: .day, value: -29, to: dayStart) ?? dayStart
+        let last30Key = dayFormatter.string(from: last30Start)
+        let last7Key = dayFormatter.string(from: last7Start)
         let todayKey = dayFormatter.string(from: dayStart)
 
         var totals = TokenTotals()
-        for file in sessionFiles(sessionsRoot: sessionsRoot, since: monthStartKey) {
+        for file in sessionFiles(sessionsRoot: sessionsRoot, since: last30Key) {
             for (day, tokens) in perDayTokens(file) {
-                if day >= monthStartKey { totals.month += tokens }
-                if day >= weekStartKey { totals.week += tokens }
+                if day >= last30Key { totals.last30 += tokens }
+                if day >= last7Key { totals.last7 += tokens }
                 if day == todayKey { totals.today += tokens }
             }
         }

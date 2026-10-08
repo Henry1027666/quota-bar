@@ -72,7 +72,9 @@ struct DashboardView: View {
             Divider().opacity(0.35)
             footer
         }
-        .padding(14)
+        .padding(.horizontal, 14)
+        .padding(.top, 24)
+        .padding(.bottom, 14)
         .frame(width: 350)
         .background(VisualEffectBackground(opacity: 0.7))
         .background(
@@ -93,31 +95,31 @@ struct DashboardView: View {
 
     // MARK: - 顶部总用量
 
-    /// 各厂商 Token 计数器在今日/本周/本月内的增量之和；无任何厂商返回 token 用量时为 nil。
-    /// 本周以周一为起点（国内习惯）。有精确分解（本地日志）的厂商用精确值，其余用采样增量估算。
-    private var tokenDeltas: (today: Int, week: Int, month: Int)? {
+    /// 各厂商 Token 计数器在今日 / 近 7 天 / 近 30 天（滚动窗口，含今天）内的用量之和；
+    /// 无任何厂商返回 token 用量时为 nil。有精确分解（本地日志 / 逐日接口）的厂商用精确值，
+    /// 其余用采样增量估算。
+    private var tokenDeltas: (today: Int, last7: Int, last30: Int)? {
         let now = Date()
-        var cal = Calendar(identifier: .gregorian)
-        cal.firstWeekday = 2
+        let cal = Calendar(identifier: .gregorian)
         let dayStart = cal.startOfDay(for: now)
-        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
-        let monthStart = cal.dateInterval(of: .month, for: now)?.start ?? dayStart
-        var today = 0, week = 0, month = 0, found = false
+        let last7Start = cal.date(byAdding: .day, value: -6, to: dayStart) ?? dayStart
+        let last30Start = cal.date(byAdding: .day, value: -29, to: dayStart) ?? dayStart
+        var today = 0, last7 = 0, last30 = 0, found = false
         for kind in sortedKinds {
             guard case .ready(let snapshot) = store.states[kind] else { continue }
             if let breakdown = snapshot.tokenBreakdown {
                 found = true
                 today += breakdown.today
-                week += breakdown.week
-                month += breakdown.month
+                last7 += breakdown.last7
+                last30 += breakdown.last30
             } else if snapshot.tokenUsage != nil {
                 found = true
                 today += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: dayStart, now: now) ?? 0)
-                week += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: weekStart, now: now) ?? 0)
-                month += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: monthStart, now: now) ?? 0)
+                last7 += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: last7Start, now: now) ?? 0)
+                last30 += Int(UsageHistory.shared.delta(kind: kind, key: "tokens", since: last30Start, now: now) ?? 0)
             }
         }
-        return found ? (today, week, month) : nil
+        return found ? (today, last7, last30) : nil
     }
 
     @ViewBuilder
@@ -129,8 +131,8 @@ struct DashboardView: View {
                 if let deltas {
                     HStack(spacing: 0) {
                         tokenStat(title: "今日用量", value: deltas.today)
-                        tokenStat(title: "本周用量", value: deltas.week)
-                        tokenStat(title: "本月用量", value: deltas.month)
+                        tokenStat(title: "近7天用量", value: deltas.last7)
+                        tokenStat(title: "近30天用量", value: deltas.last30)
                     }
                 }
                 if !trends.isEmpty {

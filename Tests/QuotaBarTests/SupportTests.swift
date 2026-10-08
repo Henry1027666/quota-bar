@@ -99,24 +99,21 @@ import Testing
 @Test func deepSeekPeriodStatsFromDailyBuckets() {
     let now = Date()
     var cal = Calendar(identifier: .gregorian)
-    cal.firstWeekday = 2
     cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
     let dayStart = cal.startOfDay(for: now)
-    let weekStart = cal.dateInterval(of: .weekOfYear, for: now)!.start
 
     let daily: [String: Int] = [
-        east8DayKey(dayStart): 100,                                  // 今天
-        east8DayKey(dayStart.addingTimeInterval(-86400)): 50,        // 昨天
-        east8DayKey(dayStart.addingTimeInterval(-40 * 86400)): 9999  // 40 天前：任何区间都不计入
+        east8DayKey(dayStart): 100,                                         // 今天
+        east8DayKey(dayStart.addingTimeInterval(-8 * 86400)): 50,           // 8 天前：近30天含、近7天不含
+        east8DayKey(dayStart.addingTimeInterval(-40 * 86400)): 9999         // 40 天前：都不含
     ]
     let stats = DeepSeekProvider.periodStats(daily, now: now)
     #expect(stats.today == 100)
-    let yesterdayInWeek = dayStart.addingTimeInterval(-86400) >= weekStart
-    #expect(stats.breakdown.week == (yesterdayInWeek ? 150 : 100))
-    #expect(stats.breakdown.month == 150)
+    #expect(stats.breakdown.last7 == 100)
+    #expect(stats.breakdown.last30 == 150)
     #expect(stats.daily.count == 7)
     #expect(stats.daily.last?.tokens == 100)
-    #expect(stats.daily.reduce(0) { $0 + $1.tokens } == 150)
+    #expect(stats.daily.reduce(0) { $0 + $1.tokens } == 100)
 }
 
 /// 东八区 "yyyy-MM-dd"，与 DeepSeekProvider 的 bucket day key 口径一致。

@@ -6,12 +6,9 @@ import Testing
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("codex-test-\(UUID().uuidString)")
     let sessions = root.appendingPathComponent("sessions")
-    var cal = Calendar(identifier: .gregorian)
-    cal.firstWeekday = 2
+    let cal = Calendar(identifier: .gregorian)
     let now = Date()
     let dayStart = cal.startOfDay(for: now)
-    let weekStart = cal.dateInterval(of: .weekOfYear, for: now)!.start
-    let monthStart = cal.dateInterval(of: .month, for: now)!.start
 
     // 按 sessions/YYYY/MM/DD/rollout.jsonl 结构写 fixture，事件时间戳取当天本地正午
     func write(tokens: Int, day: Date, name: String) throws {
@@ -26,16 +23,14 @@ import Testing
         try line.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
     }
 
-    try write(tokens: 1000, day: dayStart, name: "a.jsonl")
-    try write(tokens: 500, day: dayStart.addingTimeInterval(-86400), name: "b.jsonl")
-    try write(tokens: 9000, day: monthStart.addingTimeInterval(-86400), name: "c.jsonl")
+    try write(tokens: 1000, day: dayStart, name: "a.jsonl")                        // 今天
+    try write(tokens: 500, day: dayStart.addingTimeInterval(-8 * 86400), name: "b.jsonl")   // 8 天前：近30天含、近7天不含
+    try write(tokens: 9000, day: dayStart.addingTimeInterval(-40 * 86400), name: "c.jsonl") // 40 天前：都不含
 
     let totals = CodexLocalLogs.tokenTotals(sessionsRoot: sessions, now: now)
     #expect(totals.today == 1000)
-    let yesterdayInWeek = dayStart.addingTimeInterval(-86400) >= weekStart
-    let yesterdayInMonth = dayStart.addingTimeInterval(-86400) >= monthStart
-    #expect(totals.week == (yesterdayInWeek ? 1500 : 1000))
-    #expect(totals.month == (yesterdayInMonth ? 1500 : 1000))
+    #expect(totals.last7 == 1000)
+    #expect(totals.last30 == 1500)
 
     try FileManager.default.removeItem(at: root)
 }
