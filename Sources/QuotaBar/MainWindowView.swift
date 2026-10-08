@@ -57,6 +57,8 @@ struct MainWindowView: View {
                 SettingsView(store: store)
             }
         }
+        // 移除侧边栏切换按钮：macOS 26 上它渲染成悬浮在标题栏中央的胶囊，这种小窗口用不到
+        .toolbar(removing: .sidebarToggle)
         .task { await store.refresh() }
     }
 }
@@ -112,7 +114,6 @@ private struct OverviewView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .navigationTitle("总览")
     }
 
     private func bigStat(title: String, value: Int) -> some View {
@@ -163,9 +164,9 @@ private struct ProviderDetailView: View {
                 }
             }
             .padding(20)
+            .padding(.top, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .navigationTitle(kind.name)
     }
 
     private var header: some View {
@@ -338,7 +339,6 @@ private struct SettingsView: View {
         .formStyle(.grouped)
         .padding()
         .frame(maxWidth: 560)
-        .navigationTitle("设置")
     }
 
     private var deepSeekStatus: String {

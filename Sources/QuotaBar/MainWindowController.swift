@@ -49,6 +49,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             backing: .buffered, defer: false
         )
         window.title = "Quota Bar"
+        // 隐藏标题文字：各详情页有自己的大标题头部，标题栏再显示一遍纯属重复
+        window.titleVisibility = .hidden
         window.minSize = NSSize(width: 760, height: 500)
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(
