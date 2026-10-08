@@ -27,9 +27,9 @@ private struct VisualEffectBackground: NSViewRepresentable {
     }
 }
 
-/// 精简弹层：顶部为今日/近7天/近30天 token 总用量（纯展示），下方为厂商紧凑行
-/// （图标/名称/副标题/百分比/一条细进度条）。图表与明细全部移至主窗口，
-/// 点击紧凑行或底部「打开详情」跳转。
+/// 弹层：顶部为今日/近7天/近30天 token 总用量（纯展示），下方为厂商卡片
+/// （完整配额窗口进度条 + 余额行，不含图表）。图表与历史明细在主窗口查看，
+/// 点击卡片或底部「打开详情」跳转。
 struct DashboardView: View {
     @ObservedObject var store: QuotaStore
     @State private var refreshHovered = false
@@ -40,7 +40,7 @@ struct DashboardView: View {
     var onOpenMainWindow: ((ProviderKind?) -> Void)?
 
     /// 卡片列表区（ScrollView）最大高度：条目再多也不超过此高度，超出滚动。
-    static let maxContentHeight: CGFloat = 320
+    static let maxContentHeight: CGFloat = 560
 
     private var sortedKinds: [ProviderKind] {
         sortedVisibleKinds(states: store.states)
@@ -51,7 +51,7 @@ struct DashboardView: View {
             summarySection
 
             ScrollView {
-                LazyVStack(spacing: 6) {
+                LazyVStack(spacing: 8) {
                     ForEach(sortedKinds) { kind in
                         ProviderRowView(kind: kind, state: store.states[kind] ?? .loading) {
                             onOpenMainWindow?(kind)
@@ -151,8 +151,8 @@ struct DashboardView: View {
     }
 }
 
-/// 弹层厂商紧凑行：图标 + 名称（点击开官网）+ 副标题 + 右侧百分比/余额 + 一条细进度条
-/// （取第一个配额窗口，无窗口则不显示）。点击整行打开主窗口并定位到该厂商详情页。
+/// 弹层厂商卡片：头部（图标/名称开官网/副标题/右侧百分比或余额）+ 全部配额窗口进度条
+/// + 余额行 + 提示信息，不含图表。点击卡片打开主窗口并定位到该厂商详情页。
 private struct ProviderRowView: View {
     let kind: ProviderKind
     let state: ProviderState
@@ -162,7 +162,7 @@ private struct ProviderRowView: View {
 
     var body: some View {
         Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 9) {
                 HStack(spacing: 10) {
                     Image(systemName: kind.symbol)
                         .font(.system(size: 13, weight: .semibold))
@@ -193,12 +193,47 @@ private struct ProviderRowView: View {
                     trailingSummary
                 }
 
-                if case .ready(let snapshot) = state, let window = snapshot.windows.first {
-                    thinBar(fraction: window.fraction)
+                if case .ready(let snapshot) = state {
+                    if !snapshot.windows.isEmpty {
+                        VStack(spacing: 8) {
+                            ForEach(snapshot.windows.prefix(4)) { window in
+                                QuotaRow(window: window, tint: kind.tint)
+                            }
+                        }
+                    }
+                    let balances = displayBalances(kind: kind, snapshot: snapshot)
+                    if !balances.isEmpty {
+                        VStack(spacing: 4) {
+                            ForEach(balances, id: \.label) { group in
+                                HStack {
+                                    Text(group.label).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text(group.text)
+                                        .monospacedDigit()
+                                        .fontWeight(.medium)
+                                }
+                                .font(.caption)
+                            }
+                        }
+                    }
+                    if kind == .deepSeek, snapshot.tokenUsage == nil, snapshot.requestCount == nil {
+                        Button {
+                            DeepSeekWebSession.shared.showLoginWindow()
+                        } label: {
+                            Label("登录 DeepSeek 获取今日用量", systemImage: "person.crop.circle.badge.plus")
+                                .font(.caption)
+                                .foregroundStyle(kind.tint)
+                        }
+                        .buttonStyle(.plain)
+                        .help("在应用内登录 DeepSeek 开放平台，自动统计今日调用次数与消耗")
+                    }
+                    if let message = snapshot.message {
+                        Text(message).font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.vertical, 10)
             .background(
                 .quaternary.opacity(rowHovered ? 0.6 : 0.35),
                 in: RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -208,19 +243,6 @@ private struct ProviderRowView: View {
         .buttonStyle(.plain)
         .onHover { rowHovered = $0 }
         .help("打开主窗口查看 \(kind.name) 详情")
-    }
-
-    /// 细进度条：阈值配色与 QuotaRow 一致（≥90% 红、≥70% 橙）。
-    private func thinBar(fraction: Double) -> some View {
-        let tint: Color = fraction >= 0.9 ? .red : fraction >= 0.7 ? .orange : kind.tint
-        return GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.08))
-                Capsule().fill(tint)
-                    .frame(width: geo.size.width * min(max(fraction, 0), 1))
-            }
-        }
-        .frame(height: 3)
     }
 
     @ViewBuilder

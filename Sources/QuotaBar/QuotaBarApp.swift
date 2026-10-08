@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 350, height: 420)
+        popover.contentSize = NSSize(width: 350, height: 620)
         let hosting = NSHostingController(
             rootView: DashboardView(
                 store: store,
