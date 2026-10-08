@@ -36,6 +36,8 @@ struct DashboardView: View {
     @State private var refreshHovered = false
     /// 顶部统计选中的统计周期，下方趋势图随之切换。
     @State private var period: TrendPeriod = .today
+    /// 图表翻页偏移：0 为当前周期，每翻一页回退一个周期（日/周/月随 period）。
+    @State private var pageOffset = 0
     /// 内容高度变化回调：AppDelegate 据此更新 popover 尺寸，实现窗口随条目自适应。
     var onContentHeightChange: ((CGFloat) -> Void)?
 
@@ -138,20 +140,7 @@ struct DashboardView: View {
                     }
                 }
                 if !trends.isEmpty {
-                    switch period {
-                    case .today:
-                        if hourlyTrends.isEmpty {
-                            chartPlaceholder("今日尚无逐小时用量数据")
-                        } else {
-                            HourlyTrendChart(trends: hourlyTrends)
-                        }
-                    case .last7:
-                        CombinedTrendChart(
-                            trends: trends.map { ProviderTrend(kind: $0.kind, days: Array($0.days.suffix(7))) }
-                        )
-                    case .last30:
-                        ContributionGrid(trends: trends)
-                    }
+                    chartPager
                 }
             }
             .padding(.bottom, 6)
@@ -160,33 +149,125 @@ struct DashboardView: View {
         }
     }
 
-    /// 参与趋势图的厂商逐日序列（近 30 天）：有本地日志/逐日接口数据的用逐日精确值，
-    /// 其余有 token 计数器的用采样按日增量估算；完全没有 token 数据的不参与。
-    private var trends: [ProviderTrend] {
-        sortedKinds.compactMap { kind in
-            guard case .ready(let snapshot) = store.states[kind] else { return nil }
-            if let daily = snapshot.dailyTokens {
-                return ProviderTrend(kind: kind, days: daily)
+    /// 图表区：翻页头（‹ 日期范围 ›）+ 固定高度内容，切换周期或翻页时窗口不抖动。
+    private static let chartHeight: CGFloat = 96
+
+    @ViewBuilder
+    private var chartPager: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Button { pageOffset -= 1 } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Text(pageRangeTitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Button { pageOffset += 1 } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(pageOffset == 0)
+                .opacity(pageOffset == 0 ? 0.25 : 1)
+                Spacer()
             }
-            guard snapshot.tokenUsage != nil else { return nil }
-            let days = UsageHistory.shared.dailyDeltas(kind: kind, key: "tokens", days: 30)
-            return days.contains(where: { $0.tokens > 0 }) ? ProviderTrend(kind: kind, days: days) : nil
+
+            Group {
+                switch period {
+                case .today:
+                    if pagedHourlyTrends.isEmpty {
+                        chartPlaceholder("该日无逐小时用量数据")
+                    } else {
+                        HourlyTrendChart(trends: pagedHourlyTrends)
+                    }
+                case .last7:
+                    if pagedDailyTrends.isEmpty {
+                        chartPlaceholder("该时段无用量数据")
+                    } else {
+                        CombinedTrendChart(trends: pagedDailyTrends)
+                    }
+                case .last30:
+                    if pagedDailyTrends.isEmpty {
+                        chartPlaceholder("该时段无用量数据")
+                    } else {
+                        ContributionGrid(trends: pagedDailyTrends)
+                    }
+                }
+            }
+            .frame(height: Self.chartHeight)
         }
     }
 
-    /// 参与今日逐小时曲线的厂商序列（本地日志 / 逐小时接口精确值）；截掉未来小时。
-    private var hourlyTrends: [ProviderHourlyTrend] {
+    /// 当前页锚定的窗口末日：pageOffset 为 0 时是今天，每翻一页回退一个周期。
+    private var pageEndDay: Date {
+        let step = switch period {
+        case .today: 1
+        case .last7: 7
+        case .last30: 30
+        }
+        return Calendar.current.date(byAdding: .day, value: pageOffset * step, to: Date()) ?? Date()
+    }
+
+    /// 翻页头的日期范围文案。
+    private var pageRangeTitle: String {
+        let cal = Calendar(identifier: .gregorian)
+        let end = cal.startOfDay(for: pageEndDay)
+        switch period {
+        case .today:
+            return end.formatted(.dateTime.month(.wide).day().weekday(.abbreviated))
+        case .last7, .last30:
+            let days = period == .last7 ? 7 : 30
+            let start = cal.date(byAdding: .day, value: -(days - 1), to: end) ?? end
+            return "\(start.formatted(.dateTime.month(.wide).day())) – \(end.formatted(.dateTime.month(.wide).day()))"
+        }
+    }
+
+    /// 当前页的厂商逐日序列（近 7 天曲线 / 近 30 天点阵共用）。
+    private var pagedDailyTrends: [ProviderTrend] {
+        let days = period == .last7 ? 7 : 30
+        return sortedKinds.compactMap { kind in
+            guard let result = UsageTrendData.daily(
+                kind: kind, days: days, endingOn: pageEndDay,
+                snapshot: store.states[kind]?.snapshot
+            ) else { return nil }
+            return ProviderTrend(kind: kind, days: result)
+        }
+    }
+
+    /// 当前页的厂商逐小时序列（仅今日视图）；今天的序列截掉未来小时。
+    private var pagedHourlyTrends: [ProviderHourlyTrend] {
         let now = Date()
         return sortedKinds.compactMap { kind in
-            guard case .ready(let snapshot) = store.states[kind],
-                  let hourly = snapshot.hourlyTokens, !hourly.isEmpty else { return nil }
-            return ProviderHourlyTrend(kind: kind, hours: hourly.filter { $0.hour <= now })
+            guard let hours = UsageTrendData.hourly(
+                kind: kind, on: pageEndDay, snapshot: store.states[kind]?.snapshot
+            ) else { return nil }
+            return ProviderHourlyTrend(kind: kind, hours: hours.filter { $0.hour <= now })
         }
     }
 
-    /// 顶部统计项：同时是趋势图周期切换按钮，选中项带浅色底。
+    /// 当前窗口（不翻页）的厂商逐日序列，只用于判断是否有数据可展示图表区。
+    private var trends: [ProviderTrend] {
+        sortedKinds.compactMap { kind in
+            guard let result = UsageTrendData.daily(
+                kind: kind, days: 30, endingOn: Date(), snapshot: store.states[kind]?.snapshot
+            ) else { return nil }
+            return ProviderTrend(kind: kind, days: result)
+        }
+    }
+
+    /// 顶部统计项：同时是趋势图周期切换按钮，选中项带浅色底；切换时翻页归零。
     private func periodStat(title: String, value: Int, period: TrendPeriod) -> some View {
-        Button { self.period = period } label: {
+        Button {
+            self.period = period
+            pageOffset = 0
+        } label: {
             VStack(spacing: 2) {
                 Text(value.formatted(.number.notation(.compactName)))
                     .font(.system(size: 15, weight: .semibold))
@@ -210,7 +291,7 @@ struct DashboardView: View {
         Text(text)
             .font(.caption2)
             .foregroundStyle(.tertiary)
-            .frame(maxWidth: .infinity, minHeight: 90)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var footer: some View {
@@ -452,7 +533,7 @@ private struct CombinedTrendChart: View {
                 }
             }
         }
-        .frame(height: 90)
+        .frame(maxHeight: .infinity)
     }
 
     /// 各厂商序列共享同一组自然日，用第一条序列找离鼠标最近的一天。
@@ -565,7 +646,7 @@ private struct HourlyTrendChart: View {
                 }
             }
         }
-        .frame(height: 90)
+        .frame(maxHeight: .infinity)
     }
 
     private func nearestHour(to date: Date) -> Date? {
@@ -602,13 +683,16 @@ private struct HourlyTrendChart: View {
 }
 
 /// 近 30 天点阵贡献图（GitHub 风格）：周一到周日七列、逐周一行，
-/// 颜色深浅表示当日各厂商 token 合计；悬停格子时底部说明行切换为当日明细。
+/// 颜色深浅表示当日各厂商 token 合计；悬停格子浮出气泡显示当日明细。
+/// 格子刻意做小（13pt），与曲线图同高，切换周期时窗口不抖动。
 private struct ContributionGrid: View {
     let trends: [ProviderTrend]
     @State private var hoverDay: Date?
+    @State private var hoverIndex = 0
 
-    private static let cellSize: CGFloat = 26
-    private static let cellSpacing: CGFloat = 4
+    private static let cellSize: CGFloat = 13
+    private static let cellSpacing: CGFloat = 3
+    private static let gridWidth = 7 * cellSize + 6 * cellSpacing
 
     /// 逐日合计（当日 00:00 → tokens）
     private var totals: [Date: Int] {
@@ -631,37 +715,47 @@ private struct ContributionGrid: View {
     var body: some View {
         let totals = self.totals
         let maxTokens = totals.values.max() ?? 0
-        VStack(spacing: 6) {
+        let cells = self.cells
+        GeometryReader { geo in
             LazyVGrid(
                 columns: Array(repeating: GridItem(.fixed(Self.cellSize), spacing: Self.cellSpacing), count: 7),
                 spacing: Self.cellSpacing
             ) {
-                ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                ForEach(Array(cells.enumerated()), id: \.offset) { index, cell in
                     if let day = cell {
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
                             .fill(color(for: totals[day] ?? 0, max: maxTokens))
                             .frame(width: Self.cellSize, height: Self.cellSize)
                             .onHover { hovering in
-                                if hovering { hoverDay = day } else if hoverDay == day { hoverDay = nil }
+                                if hovering {
+                                    hoverDay = day
+                                    hoverIndex = index
+                                } else if hoverDay == day {
+                                    hoverDay = nil
+                                }
                             }
                     } else {
                         Color.clear.frame(width: Self.cellSize, height: Self.cellSize)
                     }
                 }
             }
-            .frame(maxWidth: .infinity)
-
-            if let hoverDay {
-                Text(hoverCaption(for: hoverDay))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            } else if let first = trends.first?.days.first?.day, let last = trends.first?.days.last?.day {
-                Text("\(first.formatted(.dateTime.month(.wide).day())) – \(last.formatted(.dateTime.month(.wide).day())) · 每格一天")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .topLeading) {
+                if let hoverDay {
+                    tooltip(for: hoverDay)
+                        .offset(x: tooltipX(in: geo.size.width), y: 2)
+                        .allowsHitTesting(false)
+                }
             }
         }
+    }
+
+    /// 气泡跟随悬停格子的列：格子中心水平对齐，并在图表区内钳制。
+    private func tooltipX(in width: CGFloat) -> CGFloat {
+        let originX = (width - Self.gridWidth) / 2
+        let column = hoverIndex % 7
+        let centerX = originX + CGFloat(column) * (Self.cellSize + Self.cellSpacing) + Self.cellSize / 2
+        return min(max(centerX - 61, 0), max(width - 122, 0))
     }
 
     private func color(for tokens: Int, max maxTokens: Int) -> Color {
@@ -674,13 +768,30 @@ private struct ContributionGrid: View {
         }
     }
 
-    /// 悬停明细：日期 + 各厂商当日用量。
-    private func hoverCaption(for day: Date) -> String {
-        let parts = trends.map { trend in
-            let tokens = trend.days.first { $0.day == day }?.tokens ?? 0
-            return "\(trend.kind.name) \(tokens.formatted(.number.notation(.compactName)))"
+    private func tooltip(for day: Date) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(day.formatted(.dateTime.month(.wide).day().weekday(.abbreviated)))
+                .fontWeight(.semibold)
+            ForEach(trends) { trend in
+                HStack(spacing: 4) {
+                    Circle().fill(trend.kind.tint).frame(width: 5, height: 5)
+                    Text(trend.kind.name)
+                    Spacer()
+                    Text((trend.days.first { $0.day == day }?.tokens ?? 0)
+                        .formatted(.number.notation(.compactName)))
+                        .monospacedDigit()
+                }
+            }
         }
-        return "\(day.formatted(.dateTime.month(.wide).day().weekday(.abbreviated))) · \(parts.joined(separator: " · "))"
+        .font(.caption2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(width: 122)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.secondary.opacity(0.2), lineWidth: 0.5)
+        )
     }
 }
 
@@ -720,6 +831,11 @@ private extension ProviderState {
     var tier: PlanTier {
         if case .ready(let snapshot) = self { return snapshot.planTier }
         return .free
+    }
+
+    var snapshot: ProviderSnapshot? {
+        if case .ready(let snapshot) = self { return snapshot }
+        return nil
     }
 }
 
