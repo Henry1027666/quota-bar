@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Quota Bar — 总览页重设计稿 v3</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    background: #e8e8ed;
+    display: flex; justify-content: center; padding: 32px 0;
+  }
+  .window {
+    width: 900px; display: flex;
+    background: #f5f5f7; border-radius: 12px; overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,.28), 0 0 0 0.5px rgba(0,0,0,.15);
+  }
+  .sidebar {
+    width: 158px; flex-shrink: 0; background: #ededf0;
+    padding: 56px 10px 12px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .side-row {
+    display: flex; align-items: center; gap: 7px;
+    padding: 6px 9px; border-radius: 7px;
+    font-size: 13px; color: #3a3a3c; user-select: none;
+  }
+  .side-row .ico { width: 16px; text-align: center; font-size: 12px; color: #0a84ff; }
+  .side-row.on { background: #0a84ff; color: #fff; font-weight: 500; }
+  .side-row.on .ico { color: #fff; }
+
+  .main { flex: 1; min-width: 0; }
+  .titlebar {
+    height: 52px; display: flex; align-items: center; justify-content: flex-end;
+    padding: 0 18px; border-bottom: 0.5px solid rgba(0,0,0,.06);
+  }
+  .tb-btn {
+    width: 28px; height: 28px; border-radius: 7px; border: none;
+    background: transparent; color: #6e6e73; font-size: 14px;
+  }
+  .content { padding: 16px 20px 24px; }
+
+  /* 作用域切换器：总览 / Codex / Kimi Code / DeepSeek */
+  .scope {
+    display: flex; gap: 4px; margin-bottom: 14px;
+    background: rgba(118,118,128,.10); border-radius: 10px; padding: 3px;
+    width: fit-content;
+  }
+  .scope .s {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12.5px; padding: 5px 16px; border-radius: 8px;
+    color: #3a3a3c; cursor: pointer; user-select: none;
+  }
+  .scope .s i { width: 7px; height: 7px; border-radius: 50%; }
+  .scope .s.on { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.14); font-weight: 600; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 12px; }
+  .stat {
+    background: #fff; border-radius: 12px; padding: 13px 15px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 0 0 0.5px rgba(0,0,0,.04);
+  }
+  .stat .label { font-size: 12px; color: #6e6e73; font-weight: 500; margin-bottom: 5px; }
+  .stat .value { font-size: 25px; font-weight: 600; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
+
+  .card {
+    background: #fff; border-radius: 12px; padding: 13px 15px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 0 0 0.5px rgba(0,0,0,.04);
+    margin-bottom: 12px;
+  }
+  .card-title { font-size: 12px; color: #6e6e73; font-weight: 500; margin-bottom: 9px; }
+  .chart-head { display: flex; align-items: center; margin-bottom: 7px; }
+  .seg { display: inline-flex; background: rgba(118,118,128,.12); border-radius: 8px; padding: 2px; }
+  .seg span { font-size: 12px; padding: 3px 13px; border-radius: 6px; color: #3a3a3c; }
+  .seg span.on { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.12); font-weight: 500; }
+  .chart-head .spacer { flex: 1; }
+  .pager { font-size: 12px; color: #6e6e73; display: flex; align-items: center; gap: 10px; font-variant-numeric: tabular-nums; }
+  .pager .chev { color: #aeaeb2; font-size: 11px; }
+  .legend { display: flex; gap: 14px; font-size: 11px; color: #6e6e73; margin-bottom: 4px; }
+  .legend i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; }
+
+  .quota { margin-bottom: 7px; }
+  .quota .q-row { display: flex; font-size: 11px; color: #6e6e73; margin-bottom: 4px; }
+  .quota .q-row b { font-weight: 400; margin-left: auto; font-variant-numeric: tabular-nums; }
+  .bar { height: 5px; border-radius: 3px; background: rgba(0,0,0,.06); overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 3px; }
+  .balance-row { display: flex; font-size: 12px; padding: 3px 0; }
+  .balance-row .l { color: #6e6e73; }
+  .balance-row .v { margin-left: auto; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .d-sub { font-size: 11px; color: #86868b; }
+
+  .scope-page { display: none; }
+  .scope-page.show { display: block; }
+  .footer-note { font-size: 11px; color: #aeaeb2; text-align: center; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="sidebar">
+    <div class="side-row on"><span class="ico">📈</span>总览</div>
+    <div class="side-row"><span class="ico">⚙️</span>设置</div>
+  </div>
+
+  <div class="main">
+    <div class="titlebar"><button class="tb-btn">↻</button></div>
+
+    <div class="content">
+      <!-- 作用域切换器 -->
+      <div class="scope">
+        <div class="s on" onclick="scope('all',this)">总览</div>
+        <div class="s" onclick="scope('codex',this)"><i style="background:#0a84ff"></i>Codex</div>
+        <div class="s" onclick="scope('kimi',this)"><i style="background:#30d158"></i>Kimi Code</div>
+        <div class="s" onclick="scope('deepseek',this)"><i style="background:#32ade6"></i>DeepSeek</div>
+      </div>
+
+      <!-- ═══ 总览作用域 ═══ -->
+      <div class="scope-page show" id="p-all">
+        <div class="stats">
+          <div class="stat"><div class="label">今日用量</div><div class="value">8505万</div></div>
+          <div class="stat"><div class="label">近7天用量</div><div class="value">8505万</div></div>
+          <div class="stat"><div class="label">近30天用量</div><div class="value">41亿</div></div>
+        </div>
+        <div class="card">
+          <div class="chart-head">
+            <div class="seg"><span class="on">今日</span><span>近7天</span><span>近30天</span></div>
+            <div class="spacer"></div>
+            <div class="pager"><span class="chev">‹</span><span>10月8日 周四</span><span class="chev">›</span></div>
+          </div>
+          <div class="legend">
+            <span><i style="background:#0a84ff"></i>Codex</span>
+            <span><i style="background:#30d158"></i>Kimi Code</span>
+            <span><i style="background:#32ade6"></i>DeepSeek</span>
+          </div>
+          <svg viewBox="0 0 720 180" width="100%" height="180" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="gb" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#0a84ff" stop-opacity=".14"/><stop offset="1" stop-color="#0a84ff" stop-opacity="0"/>
+              </linearGradient>
+              <linearGradient id="gg" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#30d158" stop-opacity=".14"/><stop offset="1" stop-color="#30d158" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <line x1="0" y1="164" x2="720" y2="164" stroke="rgba(0,0,0,.08)"/>
+            <path d="M0,162 C60,161 120,162 180,161 C240,160 300,159 330,152 C380,140 410,118 440,92 C470,58 500,80 530,120 C560,152 620,158 670,160 L720,161 L720,164 L0,164 Z" fill="url(#gb)"/>
+            <path d="M0,162 C60,161 120,162 180,161 C240,160 300,159 330,152 C380,140 410,118 440,92 C470,58 500,80 530,120 C560,152 620,158 670,160 L720,161" fill="none" stroke="#0a84ff" stroke-width="2" stroke-linecap="round"/>
+            <path d="M0,163 C120,163 240,162 330,160 C400,158 430,152 460,138 C490,122 510,128 540,148 C580,158 640,160 720,161 L720,164 L0,164 Z" fill="url(#gg)"/>
+            <path d="M0,163 C120,163 240,162 330,160 C400,158 430,152 460,138 C490,122 510,128 540,148 C580,158 640,160 720,161" fill="none" stroke="#30d158" stroke-width="2" stroke-linecap="round"/>
+            <path d="M0,163 C200,163 400,162 500,161 C600,160 660,161 720,162" fill="none" stroke="#32ade6" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- ═══ Codex 作用域 ═══ -->
+      <div class="scope-page" id="p-codex">
+        <div class="stats">
+          <div class="stat"><div class="label">今日用量</div><div class="value">5282万</div></div>
+          <div class="stat"><div class="label">近7天用量</div><div class="value">5282万</div></div>
+          <div class="stat"><div class="label">近30天用量</div><div class="value">8亿</div></div>
+        </div>
+        <div class="card">
+          <div class="chart-head">
+            <div class="seg"><span class="on">今日</span><span>近7天</span><span>近30天</span></div>
+            <div class="spacer"></div>
+            <div class="pager"><span class="chev">‹</span><span>10月8日 周四</span><span class="chev">›</span></div>
+          </div>
+          <div class="legend"><span><i style="background:#0a84ff"></i>Codex</span></div>
+          <svg viewBox="0 0 720 180" width="100%" height="180" preserveAspectRatio="none">
+            <line x1="0" y1="164" x2="720" y2="164" stroke="rgba(0,0,0,.08)"/>
+            <path d="M0,162 C60,161 120,162 180,161 C240,160 300,159 330,152 C380,140 410,118 440,92 C470,58 500,80 530,120 C560,152 620,158 670,160 L720,161 L720,164 L0,164 Z" fill="url(#gb)"/>
+            <path d="M0,162 C60,161 120,162 180,161 C240,160 300,159 330,152 C380,140 410,118 440,92 C470,58 500,80 530,120 C560,152 620,158 670,160 L720,161" fill="none" stroke="#0a84ff" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="card">
+          <div class="card-title">配额 <span class="d-sub" style="margin-left:6px">plus · zhanghenry020@gmail.com</span></div>
+          <div class="quota">
+            <div class="q-row"><span>5 小时</span><b>已用 14% · 6天19小时</b></div>
+            <div class="bar"><i style="width:14%;background:#0a84ff"></i></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ Kimi Code 作用域 ═══ -->
+      <div class="scope-page" id="p-kimi">
+        <div class="stats">
+          <div class="stat"><div class="label">今日用量</div><div class="value">2444万</div></div>
+          <div class="stat"><div class="label">近7天用量</div><div class="value">3109万</div></div>
+          <div class="stat"><div class="label">近30天用量</div><div class="value">5亿</div></div>
+        </div>
+        <div class="card">
+          <div class="chart-head">
+            <div class="seg"><span class="on">今日</span><span>近7天</span><span>近30天</span></div>
+            <div class="spacer"></div>
+            <div class="pager"><span class="chev">‹</span><span>10月8日 周四</span><span class="chev">›</span></div>
+          </div>
+          <div class="legend"><span><i style="background:#30d158"></i>Kimi Code</span></div>
+          <svg viewBox="0 0 720 180" width="100%" height="180" preserveAspectRatio="none">
+            <line x1="0" y1="164" x2="720" y2="164" stroke="rgba(0,0,0,.08)"/>
+            <path d="M0,163 C120,163 240,162 330,160 C400,158 430,152 460,138 C490,122 510,128 540,148 C580,158 640,160 720,161 L720,164 L0,164 Z" fill="url(#gg)"/>
+            <path d="M0,163 C120,163 240,162 330,160 C400,158 430,152 460,138 C490,122 510,128 540,148 C580,158 640,160 720,161" fill="none" stroke="#30d158" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="card">
+          <div class="card-title">配额 <span class="d-sub" style="margin-left:6px">已连接</span></div>
+          <div class="quota">
+            <div class="q-row"><span>5 小时</span><b>已用 47% · 1小时5分钟</b></div>
+            <div class="bar"><i style="width:47%;background:#e69138"></i></div>
+          </div>
+          <div class="quota">
+            <div class="q-row"><span>周限额</span><b>已用 18% · 5天22小时</b></div>
+            <div class="bar"><i style="width:18%;background:#30d158"></i></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ DeepSeek 作用域 ═══ -->
+      <div class="scope-page" id="p-deepseek">
+        <div class="stats">
+          <div class="stat"><div class="label">今日用量</div><div class="value">778万</div></div>
+          <div class="stat"><div class="label">近7天用量</div><div class="value">1120万</div></div>
+          <div class="stat"><div class="label">近30天用量</div><div class="value">28亿</div></div>
+        </div>
+        <div class="card">
+          <div class="chart-head">
+            <div class="seg"><span class="on">今日</span><span>近7天</span><span>近30天</span></div>
+            <div class="spacer"></div>
+            <div class="pager"><span class="chev">‹</span><span>10月8日 周四</span><span class="chev">›</span></div>
+          </div>
+          <div class="legend"><span><i style="background:#32ade6"></i>DeepSeek</span></div>
+          <svg viewBox="0 0 720 180" width="100%" height="180" preserveAspectRatio="none">
+            <line x1="0" y1="164" x2="720" y2="164" stroke="rgba(0,0,0,.08)"/>
+            <path d="M0,162 C60,160 120,158 180,154 C240,148 300,140 380,130 C460,120 560,110 720,100 L720,164 L0,164 Z" fill="rgba(50,173,230,.1)"/>
+            <path d="M0,162 C60,160 120,158 180,154 C240,148 300,140 380,130 C460,120 560,110 720,100" fill="none" stroke="#32ade6" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="card">
+          <div class="card-title">余额与消费 <span class="d-sub" style="margin-left:6px">API</span></div>
+          <div class="balance-row"><span class="l">API 余额</span><span class="v">CNY 16.61 / USD 0.00</span></div>
+          <div class="balance-row"><span class="l">赠送余额</span><span class="v">CNY 4.49</span></div>
+          <div class="balance-row"><span class="l">累计消费</span><span class="v">CNY 679.39</span></div>
+          <div class="balance-row"><span class="l">今日消费</span><span class="v">CNY 1.51</span></div>
+        </div>
+      </div>
+
+      <div class="footer-note">🔒 仅在本机读取认证</div>
+    </div>
+  </div>
+</div>
+<script>
+  function scope(id, el) {
+    document.querySelectorAll('.scope .s').forEach(s => s.classList.remove('on'));
+    el.classList.add('on');
+    document.querySelectorAll('.scope-page').forEach(p => p.classList.remove('show'));
+    document.getElementById('p-' + id).classList.add('show');
+  }
+</script>
+</body>
+</html>

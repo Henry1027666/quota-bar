@@ -1,10 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// 主窗口侧边栏选中项（由 MainWindowController 跨层写入，弹层点厂商行时定位详情页）。
+/// 主窗口侧边栏选中项（由 MainWindowController 跨层写入，弹层点厂商行时定位作用域）。
 @MainActor
 final class MainWindowSelection: ObservableObject {
     @Published var item: SidebarItem? = .overview
+    /// 总览页作用域：nil 为全部厂商合计，否则只看该厂商（弹层点厂商行时写入）。
+    @Published var scope: ProviderKind?
 }
 
 /// 主窗口（NavigationSplitView 详情窗口）的单例管理。
@@ -20,12 +22,14 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         self.store = store
     }
 
-    /// 打开主窗口；指定厂商时把侧边栏选中项切到该厂商详情页。
+    /// 打开主窗口；指定厂商时把总览页作用域切到该厂商。
     func open(selecting kind: ProviderKind?) {
         if let kind {
-            selection.item = .provider(kind)
+            selection.item = .overview
+            selection.scope = kind
         } else if window == nil {
             selection.item = .overview
+            selection.scope = nil
         }
         let window = window ?? makeWindow()
         self.window = window

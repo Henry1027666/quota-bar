@@ -2,16 +2,14 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// 主窗口侧边栏条目：总览 / 各厂商详情 / 设置。
+/// 主窗口侧边栏条目：总览 / 设置。厂商不再是侧边栏页面，而是总览页内的作用域。
 enum SidebarItem: Hashable {
     case overview
-    case provider(ProviderKind)
     case settings
 }
 
 /// 主窗口：自绘固定侧边栏布局（不用 NavigationSplitView——它自动注入的收起按钮
 /// 在 macOS 26 上渲染成乱跑的悬浮胶囊，且这个窗口不需要收起侧边栏）。
-/// 总览下挂各厂商详情页，设置独立在底部。
 struct MainWindowView: View {
     @ObservedObject var store: QuotaStore
     @ObservedObject var selection: MainWindowSelection
@@ -35,28 +33,10 @@ struct MainWindowView: View {
                        selected: currentItem == .overview) {
                 selection.item = .overview
             }
-
-            // 厂商作为总览的下级条目缩进排列；未检测到的灰显但保留，条目不跳动
-            ForEach(ProviderKind.allCases) { kind in
-                let detected: Bool = {
-                    if case .notDetected = store.states[kind] { return false }
-                    return true
-                }()
-                SidebarRow(title: kind.name, symbol: kind.symbol,
-                           tint: detected ? kind.tint : .secondary,
-                           dimmed: !detected, indented: true,
-                           selected: currentItem == .provider(kind)) {
-                    selection.item = .provider(kind)
-                }
-            }
-
-            Divider().opacity(0.4).padding(.vertical, 6)
-
             SidebarRow(title: "设置", symbol: "gearshape", tint: .accentColor,
                        selected: currentItem == .settings) {
                 selection.item = .settings
             }
-
             Spacer()
         }
         .padding(.horizontal, 8)
@@ -71,9 +51,7 @@ struct MainWindowView: View {
     private var detail: some View {
         switch currentItem {
         case .overview:
-            OverviewView(store: store)
-        case .provider(let kind):
-            ProviderDetailView(kind: kind, state: store.states[kind] ?? .loading)
+            OverviewView(store: store, selection: selection)
         case .settings:
             SettingsView(store: store)
         }
@@ -117,7 +95,7 @@ private struct SidebarRow: View {
     }
 }
 
-/// 详情页通用卡片容器：圆角浅底 + 内边距，标题小字置顶。
+/// 通用卡片容器：圆角浅底 + 内边距，标题小字置顶。
 private struct DetailCard<Content: View>: View {
     let title: String?
     @ViewBuilder let content: Content
@@ -143,30 +121,172 @@ private struct DetailCard<Content: View>: View {
     }
 }
 
-/// 总览页：三个大数字卡片 + 卡片化的趋势图翻页器。
+/// 总览页：作用域切换器（总览/各厂商）+ 三栏统计卡 + 趋势图翻页器 + 厂商明细卡。
+/// 页面模板只有一套，切换作用域只是改数据口径：总览为全部厂商合计，厂商为单列数据。
 private struct OverviewView: View {
     @ObservedObject var store: QuotaStore
+    @ObservedObject var selection: MainWindowSelection
 
-    private var kinds: [ProviderKind] {
+    private var visibleKinds: [ProviderKind] {
         sortedVisibleKinds(states: store.states)
+    }
+
+    /// 生效作用域：选中的厂商已不可见（如变成未检测到）时回退为总览。
+    private var scope: ProviderKind? {
+        guard let s = selection.scope, visibleKinds.contains(s) else { return nil }
+        return s
+    }
+
+    private var scopedKinds: [ProviderKind] {
+        scope.map { [$0] } ?? visibleKinds
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if let deltas = tokenDeltas(kinds: kinds, states: store.states) {
+                scopeSwitcher
+
+                if let deltas = tokenDeltas(kinds: scopedKinds, states: store.states) {
                     HStack(spacing: 12) {
                         bigStat(title: "今日用量", value: deltas.today)
                         bigStat(title: "近7天用量", value: deltas.last7)
                         bigStat(title: "近30天用量", value: deltas.last30)
                     }
                 }
-                DetailCard("用量趋势") {
-                    TrendChartPager(kinds: kinds, snapshot: { store.states[$0]?.snapshot }, chartHeight: 220)
+
+                DetailCard {
+                    TrendChartPager(kinds: scopedKinds, snapshot: { store.states[$0]?.snapshot }, chartHeight: 220)
+                }
+
+                if let scope {
+                    providerDetail(kind: scope)
                 }
             }
             .padding(20)
+            .padding(.top, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: - 作用域切换器
+
+    private var scopeSwitcher: some View {
+        HStack(spacing: 4) {
+            scopeTab(title: "总览", kind: nil)
+            ForEach(visibleKinds) { kind in
+                scopeTab(title: kind.name, kind: kind)
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func scopeTab(title: String, kind: ProviderKind?) -> some View {
+        let selected = scope == kind
+        return Button {
+            selection.scope = kind
+        } label: {
+            HStack(spacing: 6) {
+                if let kind {
+                    Circle().fill(kind.tint).frame(width: 7, height: 7)
+                }
+                Text(title)
+                    .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(selected ? Color(nsColor: .controlBackgroundColor) : .clear)
+                    .shadow(color: selected ? .black.opacity(0.14) : .clear, radius: 2, y: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - 厂商明细（作用域为单个厂商时显示）
+
+    @ViewBuilder
+    private func providerDetail(kind: ProviderKind) -> some View {
+        let state = store.states[kind] ?? .loading
+        switch state {
+        case .loading:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在检测…").foregroundStyle(.secondary)
+            }
+            .font(.callout)
+        case .notDetected:
+            EmptyView()
+        case .unavailable(let message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        case .ready(let snapshot):
+            let subtitle = [snapshot.plan, snapshot.account].compactMap { $0 }.joined(separator: " · ")
+            if !snapshot.windows.isEmpty {
+                DetailCard {
+                    HStack(spacing: 6) {
+                        Text("配额")
+                            .font(.caption).fontWeight(.medium).foregroundStyle(.secondary)
+                        if !subtitle.isEmpty {
+                            Text(subtitle).font(.caption2).foregroundStyle(.tertiary)
+                        }
+                    }
+                    VStack(spacing: 10) {
+                        ForEach(snapshot.windows) { window in
+                            QuotaRow(window: window, tint: kind.tint)
+                        }
+                    }
+                }
+            }
+
+            let balances = displayBalances(kind: kind, snapshot: snapshot)
+            if !balances.isEmpty {
+                DetailCard {
+                    HStack(spacing: 6) {
+                        Text("余额与消费")
+                            .font(.caption).fontWeight(.medium).foregroundStyle(.secondary)
+                        if snapshot.windows.isEmpty, !subtitle.isEmpty {
+                            Text(subtitle).font(.caption2).foregroundStyle(.tertiary)
+                        }
+                    }
+                    VStack(spacing: 6) {
+                        ForEach(balances, id: \.label) { group in
+                            HStack {
+                                Text(group.label).foregroundStyle(.secondary)
+                                Spacer()
+                                Text(group.text)
+                                    .monospacedDigit()
+                                    .fontWeight(.medium)
+                            }
+                            .font(.callout)
+                        }
+                    }
+                }
+            }
+
+            // DeepSeek 网页用量需应用内登录一次
+            if kind == .deepSeek, snapshot.tokenUsage == nil, snapshot.requestCount == nil {
+                Button {
+                    DeepSeekWebSession.shared.showLoginWindow()
+                } label: {
+                    Label("登录 DeepSeek 获取今日用量", systemImage: "person.crop.circle.badge.plus")
+                        .font(.callout)
+                        .foregroundStyle(kind.tint)
+                }
+                .buttonStyle(.plain)
+                .help("在应用内登录 DeepSeek 开放平台，自动统计今日调用次数与消耗")
+            }
+
+            if let message = snapshot.message {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -182,167 +302,6 @@ private struct OverviewView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-}
-
-/// 厂商详情页：头部（图标/名称+官网链接/plan·account）、token 周期统计、配额窗口卡片、
-/// 余额卡片、逐日/逐小时用量曲线卡片、DeepSeek 登录入口、错误/提示信息。
-private struct ProviderDetailView: View {
-    let kind: ProviderKind
-    let state: ProviderState
-    @State private var nameHovered = false
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                header
-
-                switch state {
-                case .loading:
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("正在检测…").foregroundStyle(.secondary)
-                    }
-                    .font(.callout)
-                case .notDetected:
-                    Text("未在本机检测到 \(kind.name) 的登录凭据")
-                        .foregroundStyle(.secondary)
-                case .unavailable(let message):
-                    Label(message, systemImage: "exclamationmark.triangle")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                case .ready(let snapshot):
-                    readyContent(snapshot)
-                }
-            }
-            .padding(20)
-            .padding(.top, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            Image(systemName: kind.symbol)
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(kind.tint)
-                .frame(width: 42, height: 42)
-                .background(kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Button {
-                    if let url = kind.website { NSWorkspace.shared.open(url) }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(kind.name).font(.title3).fontWeight(.semibold)
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .foregroundStyle(nameHovered ? kind.tint : .primary)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .onHover { nameHovered = $0 }
-                .help("打开官网额度页")
-                if case .ready(let snapshot) = state {
-                    Text([snapshot.plan, snapshot.account].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? "已连接")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-        }
-    }
-
-    @ViewBuilder
-    private func readyContent(_ snapshot: ProviderSnapshot) -> some View {
-        if let breakdown = snapshot.tokenBreakdown {
-            HStack(spacing: 12) {
-                miniStat(title: "今日", value: breakdown.today)
-                miniStat(title: "近7天", value: breakdown.last7)
-                miniStat(title: "近30天", value: breakdown.last30)
-            }
-        }
-
-        if !snapshot.windows.isEmpty {
-            DetailCard("配额") {
-                VStack(spacing: 10) {
-                    ForEach(snapshot.windows) { window in
-                        QuotaRow(window: window, tint: kind.tint)
-                    }
-                }
-            }
-        }
-
-        let balances = displayBalances(kind: kind, snapshot: snapshot)
-        if !balances.isEmpty {
-            DetailCard("余额与消费") {
-                VStack(spacing: 6) {
-                    ForEach(balances, id: \.label) { group in
-                        HStack {
-                            Text(group.label).foregroundStyle(.secondary)
-                            Spacer()
-                            Text(group.text)
-                                .monospacedDigit()
-                                .fontWeight(.medium)
-                        }
-                        .font(.callout)
-                    }
-                }
-            }
-        }
-
-        if let daily = UsageTrendData.daily(kind: kind, days: 30, endingOn: Date(), snapshot: snapshot) {
-            DetailCard("近 30 天逐日用量") {
-                CombinedTrendChart(trends: [ProviderTrend(kind: kind, days: daily)])
-                    .frame(height: 160)
-            }
-        }
-
-        if let hourly = UsageTrendData.hourly(kind: kind, on: Date(), snapshot: snapshot) {
-            let hours = hourly.filter { $0.hour <= Date() }
-            if !hours.isEmpty {
-                DetailCard("今日逐小时用量") {
-                    HourlyTrendChart(trends: [ProviderHourlyTrend(kind: kind, hours: hours)])
-                        .frame(height: 160)
-                }
-            }
-        }
-
-        // 登录入口从弹层卡片挪到详情页：DeepSeek 网页用量需应用内登录一次
-        if kind == .deepSeek, snapshot.tokenUsage == nil, snapshot.requestCount == nil {
-            Button {
-                DeepSeekWebSession.shared.showLoginWindow()
-            } label: {
-                Label("登录 DeepSeek 获取今日用量", systemImage: "person.crop.circle.badge.plus")
-                    .font(.callout)
-                    .foregroundStyle(kind.tint)
-            }
-            .buttonStyle(.plain)
-            .help("在应用内登录 DeepSeek 开放平台，自动统计今日调用次数与消耗")
-        }
-
-        if let message = snapshot.message {
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func miniStat(title: String, value: Int) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(value.formatted(.number.notation(.compactName)))
-                .font(.system(size: 18, weight: .semibold))
-                .monospacedDigit()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
