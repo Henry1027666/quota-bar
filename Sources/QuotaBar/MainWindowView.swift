@@ -9,57 +9,111 @@ enum SidebarItem: Hashable {
     case settings
 }
 
-/// 主窗口：NavigationSplitView 侧边栏布局。总览下挂各厂商详情页，设置独立在底部。
+/// 主窗口：自绘固定侧边栏布局（不用 NavigationSplitView——它自动注入的收起按钮
+/// 在 macOS 26 上渲染成乱跑的悬浮胶囊，且这个窗口不需要收起侧边栏）。
+/// 总览下挂各厂商详情页，设置独立在底部。
 struct MainWindowView: View {
     @ObservedObject var store: QuotaStore
     @ObservedObject var selection: MainWindowSelection
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $selection.item) {
-                Label("总览", systemImage: "chart.line.uptrend.xyaxis")
-                    .font(.system(size: 13, weight: .medium))
-                    .tag(SidebarItem.overview)
+        HStack(spacing: 0) {
+            sidebar
+                .frame(width: 180)
+                .frame(maxHeight: .infinity)
+                .background(Color(nsColor: .underPageBackgroundColor))
 
-                // 厂商作为总览的下级条目缩进排列；未检测到的灰显但保留，条目不跳动
-                ForEach(ProviderKind.allCases) { kind in
-                    let detected: Bool = {
-                        if case .notDetected = store.states[kind] { return false }
-                        return true
-                    }()
-                    HStack(spacing: 7) {
-                        Image(systemName: kind.symbol)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(detected ? kind.tint : .secondary)
-                            .frame(width: 16)
-                        Text(kind.name)
-                            .font(.system(size: 12))
-                            .foregroundStyle(detected ? .primary : .secondary)
-                    }
-                    .padding(.leading, 16)
-                    .tag(SidebarItem.provider(kind))
-                }
-
-                Divider().opacity(0.4).padding(.vertical, 2)
-
-                Label("设置", systemImage: "gearshape")
-                    .font(.system(size: 13, weight: .medium))
-                    .tag(SidebarItem.settings)
-            }
-            .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
-        } detail: {
-            switch selection.item ?? .overview {
-            case .overview:
-                OverviewView(store: store)
-            case .provider(let kind):
-                ProviderDetailView(kind: kind, state: store.states[kind] ?? .loading)
-            case .settings:
-                SettingsView(store: store)
-            }
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // 移除侧边栏切换按钮：macOS 26 上它渲染成悬浮在标题栏中央的胶囊，这种小窗口用不到
-        .toolbar(removing: .sidebarToggle)
         .task { await store.refresh() }
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            SidebarRow(title: "总览", symbol: "chart.line.uptrend.xyaxis", tint: .accentColor,
+                       selected: currentItem == .overview) {
+                selection.item = .overview
+            }
+
+            // 厂商作为总览的下级条目缩进排列；未检测到的灰显但保留，条目不跳动
+            ForEach(ProviderKind.allCases) { kind in
+                let detected: Bool = {
+                    if case .notDetected = store.states[kind] { return false }
+                    return true
+                }()
+                SidebarRow(title: kind.name, symbol: kind.symbol,
+                           tint: detected ? kind.tint : .secondary,
+                           dimmed: !detected, indented: true,
+                           selected: currentItem == .provider(kind)) {
+                    selection.item = .provider(kind)
+                }
+            }
+
+            Divider().opacity(0.4).padding(.vertical, 6)
+
+            SidebarRow(title: "设置", symbol: "gearshape", tint: .accentColor,
+                       selected: currentItem == .settings) {
+                selection.item = .settings
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 12)
+    }
+
+    private var currentItem: SidebarItem {
+        selection.item ?? .overview
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch currentItem {
+        case .overview:
+            OverviewView(store: store)
+        case .provider(let kind):
+            ProviderDetailView(kind: kind, state: store.states[kind] ?? .loading)
+        case .settings:
+            SettingsView(store: store)
+        }
+    }
+}
+
+/// 侧边栏条目：选中态为 accent 圆角底 + 白字，未选中为透明底 + 品牌色图标。
+private struct SidebarRow: View {
+    let title: String
+    let symbol: String
+    let tint: Color
+    var dimmed = false
+    var indented = false
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(selected ? .white : tint)
+                    .frame(width: 16)
+                Text(title)
+                    .font(.system(size: 12, weight: selected ? .medium : .regular))
+                    .foregroundStyle(selected ? .white : (dimmed ? .secondary : .primary))
+                Spacer()
+            }
+            .padding(.leading, indented ? 18 : 8)
+            .padding(.trailing, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(selected ? Color.accentColor : (hovered ? Color.primary.opacity(0.06) : .clear))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
     }
 }
 
