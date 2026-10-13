@@ -249,7 +249,9 @@ private struct OverviewView: View {
             }
 
             let balances = displayBalances(kind: kind, snapshot: snapshot)
-            if !balances.isEmpty {
+            // 余额为空但有外部来源（DSH/wb ai）用量时也要显示这张卡
+            let hasExternalUsage = snapshot.externalTokensToday != nil
+            if !balances.isEmpty || hasExternalUsage {
                 DetailCard {
                     HStack(spacing: 6) {
                         Text("余额与消费")
@@ -268,6 +270,19 @@ private struct OverviewView: View {
                                     .fontWeight(.medium)
                             }
                             .font(.callout)
+                        }
+                        // 第三方路由（DSH/wb ai）的用量：不消耗本厂商余额，单独一行标注来源
+                        if let source = snapshot.externalTokenSource,
+                           let tokens = snapshot.externalTokensToday {
+                            HStack {
+                                Text("今日用量 · \(source)").foregroundStyle(.secondary)
+                                Spacer()
+                                Text(tokens.formatted(.number.notation(.compactName)))
+                                    .monospacedDigit()
+                                    .fontWeight(.medium)
+                            }
+                            .font(.callout)
+                            .help("经 WorkBuddy 路由调用，不消耗 DeepSeek 账户余额")
                         }
                     }
                 }

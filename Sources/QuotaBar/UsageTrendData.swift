@@ -23,6 +23,10 @@ enum UsageTrendData {
             }.value
             return result.contains(where: { $0.tokens > 0 }) ? result : nil
         case .deepSeek:
+            // 快照里的 DeepSeek 日序列 = platform 直连（近 30 天）+ DSH/wb ai（同窗口），
+            // 由 DeepSeekProvider 合并好后放入快照；这里只按翻页窗口切片。
+            // 注意：DSH 本地缓存其实有更久的历史，但 snapshot 只有 30 天，
+            // 翻到更早的页时 DeepSeek 会缺失——与既有 platform 口径一致，不再单独扩窗。
             guard let daily = snapshot?.dailyTokens else { return nil }
             return slice(daily: daily, days: days, endingOn: endDay)
         }

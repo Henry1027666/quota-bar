@@ -95,6 +95,11 @@ struct ProviderSnapshot: Identifiable, Equatable, Sendable {
     var dailyTokensByModel: [ModelTokenSeries]? = nil
     /// 今日逐小时 token 用量按模型拆分（口径同上）。
     var hourlyTokensByModel: [ModelTokenSeries]? = nil
+    /// 额外用量来源的名称（如 "DSH · wb ai"）：这部分 token 由第三方路由产生，
+    /// 不消耗该厂商的账户余额，卡片上单独一行展示以示区分。nil 表示无外部来源。
+    var externalTokenSource: String? = nil
+    /// 上述外部来源的今日 token 用量。
+    var externalTokensToday: Int? = nil
     /// 近一年 token 用量合计（本地日志厂商在 fetch 时后台精确统计；
     /// DeepSeek 仅近 30 天有数，即近 30 天合计）。视图层直接读它，不在主线程现算。
     var last365Tokens: Int? = nil
