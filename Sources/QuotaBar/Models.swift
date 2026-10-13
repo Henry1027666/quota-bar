@@ -2,14 +2,13 @@ import Foundation
 import SwiftUI
 
 enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
-    case codex, claude, kimi, deepSeek
+    case codex, kimi, deepSeek
 
     var id: String { rawValue }
 
     var name: String {
         switch self {
         case .codex: "Codex"
-        case .claude: "Claude Code"
         case .kimi: "Kimi Code"
         case .deepSeek: "DeepSeek"
         }
@@ -18,7 +17,6 @@ enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
     var symbol: String {
         switch self {
         case .codex: "apple.intelligence"
-        case .claude: "sparkles"
         case .kimi: "moon.stars.fill"
         case .deepSeek: "wave.3.right"
         }
@@ -27,7 +25,6 @@ enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
     var tint: Color {
         switch self {
         case .codex: .blue
-        case .claude: .orange
         case .kimi: .green
         case .deepSeek: .cyan
         }
@@ -37,7 +34,6 @@ enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
     var website: URL? {
         switch self {
         case .codex: URL(string: "https://chatgpt.com/usage")
-        case .claude: URL(string: "https://claude.ai/settings/usage")
         case .kimi: URL(string: "https://www.kimi.com/settings/subscription?tab=quota&from=kfc_console_upgrade")
         case .deepSeek: URL(string: "https://platform.deepseek.com/usage")
         }
@@ -93,6 +89,12 @@ struct ProviderSnapshot: Identifiable, Equatable, Sendable {
     /// 今日逐小时 token 用量（本地日志/逐小时接口精确统计，到当前小时为止）；
     /// 选中「今日用量」时的曲线图数据。
     var hourlyTokens: [HourlyTokenUsage]? = nil
+    /// 近 30 天逐日 token 用量按模型拆分（仅具备模型维度的厂商填充：
+    /// Codex 取 turn_context.model，Kimi 取 usage.record.model，DeepSeek 取接口 series[].model）。
+    /// 单厂商作用域的曲线图用它绘制「各模型」细线；nil 时该厂商只画总用量一条线。
+    var dailyTokensByModel: [ModelTokenSeries]? = nil
+    /// 今日逐小时 token 用量按模型拆分（口径同上）。
+    var hourlyTokensByModel: [ModelTokenSeries]? = nil
     /// 近一年 token 用量合计（本地日志厂商在 fetch 时后台精确统计；
     /// DeepSeek 仅近 30 天有数，即近 30 天合计）。视图层直接读它，不在主线程现算。
     var last365Tokens: Int? = nil
@@ -137,6 +139,22 @@ struct HourlyTokenUsage: Equatable, Sendable {
     /// 该小时起点（本地时间）
     let hour: Date
     let tokens: Int
+}
+
+/// 单个模型的一条 token 用量序列（逐日或逐小时，取决于 samples 里点的粒度）。
+///
+/// 逐日与逐小时共用同一容器：两者都只是「一段 (时间, token 数) 序列 + 模型名」，
+/// 拆成两个几乎相同的类型只会让解析层与图表层各多写一遍泛型代码。
+struct ModelTokenSeries: Identifiable, Equatable, Sendable {
+    /// 模型标识，直接来自日志/接口，如 "gpt-5.6-sol"、"kimi-code/k3-256k"、"deepseek-flash"。
+    let model: String
+    /// 升序采样点；逐日序列的 point.day 为该自然日 00:00，逐小时为整点。
+    let points: [DailyTokenUsage]
+
+    var id: String { model }
+
+    /// 序列合计，用于图例按用量降序、以及过滤零用量模型。
+    var total: Int { points.reduce(0) { $0 + $1.tokens } }
 }
 
 /// 面板内厂商卡片的显示档位，rawValue 越小越靠前。

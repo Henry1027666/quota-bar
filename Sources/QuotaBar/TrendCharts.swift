@@ -41,6 +41,53 @@ struct ProviderHourlyTrend: Identifiable {
     var id: ProviderKind { kind }
 }
 
+/// 单厂商作用域下，一张图里的一条序列：总用量（isPrimary，只用于悬停气泡）
+/// 或某个模型（由品牌色派生的同色系色阶，堆叠柱的一段）。
+struct ChartSeries: Identifiable {
+    /// 序列显示名（图例与悬停气泡用）。总用量用厂商名，模型用模型名。
+    let name: String
+    /// 该序列的采样点（逐日或逐小时，与同一张图内其他序列同轴）。
+    let points: [DailyTokenUsage]
+    let color: Color
+    /// true 表示这是总用量序列（不代表某个模型）。
+    let isPrimary: Bool
+
+    var id: String { name }
+
+    /// 合计，用于图例排序与零用量过滤。
+    var total: Int { points.reduce(0) { $0 + $1.tokens } }
+
+    /// 复制一份并改写 isPrimary：无模型维度时把总量当作唯一的分段来画。
+    func replacingPrimary(_ value: Bool) -> ChartSeries {
+        ChartSeries(name: name, points: points, color: color, isPrimary: value)
+    }
+}
+
+/// 模型曲线配色：以厂商品牌色为基准，在 HSB 空间沿「亮度 / 饱和度 / 色相」三个方向
+/// 拉开差距，保证同色系观感下相邻模型仍可区分。索引超出预设长度时循环取用。
+func modelTint(_ base: Color, index: Int) -> Color {
+    // 预设档位：亮度优先拉开，其次色相偏移（避免整组曲线同色难辨）
+    let variants: [(brightness: Double, saturation: Double, hueShift: Double)] = [
+        (1.0, 0.72, 0.0),
+        (0.72, 0.95, 0.05),
+        (1.0, 0.42, -0.06),
+        (0.55, 0.85, 0.11),
+        (0.88, 0.55, 0.17),
+        (0.42, 0.9, -0.11)
+    ]
+    let v = variants[index % variants.count]
+    let ns = NSColor(base).usingColorSpace(.deviceRGB) ?? .systemBlue
+    var hue: CGFloat = 0, sat: CGFloat = 0, bri: CGFloat = 0, alpha: CGFloat = 0
+    ns.getHue(&hue, saturation: &sat, brightness: &bri, alpha: &alpha)
+    // 色相环绕到 [0,1)，亮度钳制到可见区间（纯黑/纯白曲线都不可辨）
+    let newHue = (hue + CGFloat(v.hueShift)).truncatingRemainder(dividingBy: 1)
+    let wrappedHue = newHue < 0 ? newHue + 1 : newHue
+    let newBri = min(max(bri * CGFloat(v.brightness), 0.35), 1.0)
+    let newSat = min(max(sat * CGFloat(v.saturation), 0.25), 1.0)
+    return Color(hue: Double(wrappedHue), saturation: Double(newSat),
+                 brightness: Double(newBri), opacity: 1)
+}
+
 extension ProviderState {
     var tier: PlanTier {
         if case .ready(let snapshot) = self { return snapshot.planTier }
@@ -180,6 +227,12 @@ struct TrendChartPager: View {
     /// nil = 加载中。趋势数据在后台线程解析（日志文件量大），加载期间显示占位。
     @State private var dailyTrends: [ProviderTrend]?
     @State private var hourlyTrends: [ProviderHourlyTrend]?
+    /// 单厂商作用域下的「总用量 + 各模型」曲线组（总览作用域恒为 nil，不参与渲染）。
+    @State private var dailySeries: [ChartSeries]?
+    @State private var hourlySeries: [ChartSeries]?
+
+    /// 是否单厂商作用域：此时曲线图展开到「总用量 + 各模型」。
+    private var isSingleProvider: Bool { kinds.count == 1 }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -208,13 +261,23 @@ struct TrendChartPager: View {
             }
             .onChange(of: period) { _, _ in pageOffset = 0 }
 
-            // 自定义图例：彩色圆点 + 厂商名（图表内自动图例已隐藏）
-            if !legendKinds.isEmpty {
+            // 自定义图例：彩色圆点 + 名称（图表内自动图例已隐藏）
+            if !legendEntries.isEmpty {
                 HStack(spacing: 12) {
-                    ForEach(legendKinds) { kind in
+                    ForEach(legendEntries) { entry in
                         HStack(spacing: 4) {
-                            Circle().fill(kind.tint).frame(width: 6, height: 6)
-                            Text(kind.name)
+                            // 单厂商堆叠柱图里图例只列各模型（方块，与堆叠段一致）；
+                            // 总览仍是各厂商曲线（圆点）。总量不进图例，它在悬停气泡里给出。
+                            if isSingleProvider {
+                                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                                    .fill(entry.color)
+                                    .frame(width: 7, height: 7)
+                            } else {
+                                Circle().fill(entry.color).frame(width: 6, height: 6)
+                            }
+                            Text(entry.name)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                         }
                     }
                     Spacer()
@@ -226,7 +289,13 @@ struct TrendChartPager: View {
             Group {
                 switch period {
                 case .today:
-                    if let hourlyTrends {
+                    if let hourlySeries, isSingleProvider {
+                        if hourlySeries.isEmpty {
+                            chartPlaceholder("该日无逐小时用量数据")
+                        } else {
+                            MultiSeriesHourlyChart(series: hourlySeries, tint: kinds[0].tint)
+                        }
+                    } else if let hourlyTrends {
                         if hourlyTrends.isEmpty {
                             chartPlaceholder("该日无逐小时用量数据")
                         } else {
@@ -236,7 +305,15 @@ struct TrendChartPager: View {
                         chartPlaceholder("加载中…")
                     }
                 case .last7, .last30, .last365:
-                    if let dailyTrends {
+                    if let dailySeries, isSingleProvider {
+                        if dailySeries.isEmpty {
+                            chartPlaceholder("该时段无用量数据")
+                        } else if period == .last365 {
+                            MultiSeriesContributionGrid(series: dailySeries)
+                        } else {
+                            MultiSeriesTrendChart(series: dailySeries, tint: kinds[0].tint)
+                        }
+                    } else if let dailyTrends {
                         if dailyTrends.isEmpty {
                             chartPlaceholder("该时段无用量数据")
                         } else if period == .last365 {
@@ -255,6 +332,8 @@ struct TrendChartPager: View {
             // 切周期/翻页时先置回加载态，避免旧数据在新口径下闪一帧
             dailyTrends = nil
             hourlyTrends = nil
+            dailySeries = nil
+            hourlySeries = nil
             await reload()
         }
     }
@@ -265,10 +344,18 @@ struct TrendChartPager: View {
     }
 
     /// 后台加载当前页的厂商趋势序列（UsageTrendData 内部已把文件 IO 放到非主线程）。
+    /// 单厂商作用域额外加载模型维度，组装成「总用量 + 各模型」曲线组。
     private func reload() async {
         let end = pageEndDay
         if period == .today {
             let now = Date()
+            if isSingleProvider, let kind = kinds.first {
+                let totals = await UsageTrendData.hourly(kind: kind, on: end, snapshot: snapshot(kind)) ?? []
+                let byModel = await UsageTrendData.hourlyByModel(kind: kind, on: end, snapshot: snapshot(kind)) ?? []
+                hourlySeries = buildSeries(kind: kind, totalPoints: totals.map { ($0.hour, $0.tokens) },
+                                           modelSeries: byModel)
+                return
+            }
             var result: [ProviderHourlyTrend] = []
             for kind in kinds {
                 if let hours = await UsageTrendData.hourly(kind: kind, on: end, snapshot: snapshot(kind)) {
@@ -277,6 +364,17 @@ struct TrendChartPager: View {
             }
             hourlyTrends = result
         } else {
+            if isSingleProvider, let kind = kinds.first {
+                let totals = await UsageTrendData.daily(
+                    kind: kind, days: period.days, endingOn: end, snapshot: snapshot(kind)
+                ) ?? []
+                let byModel = await UsageTrendData.dailyByModel(
+                    kind: kind, days: period.days, endingOn: end, snapshot: snapshot(kind)
+                ) ?? []
+                dailySeries = buildSeries(kind: kind, totalPoints: totals.map { ($0.day, $0.tokens) },
+                                          modelSeries: byModel)
+                return
+            }
             var result: [ProviderTrend] = []
             for kind in kinds {
                 if let days = await UsageTrendData.daily(
@@ -287,6 +385,31 @@ struct TrendChartPager: View {
             }
             dailyTrends = result
         }
+    }
+
+    /// 组装单厂商曲线组：第 0 条是总用量（粗线、品牌色），其后为各模型（细线、色阶）。
+    /// 总用量与模型合计理论上相等；两者都为空时返回空数组（交由占位文案处理）。
+    private func buildSeries(kind: ProviderKind, totalPoints: [(Date, Int)],
+                             modelSeries: [ModelTokenSeries]) -> [ChartSeries] {
+        var series: [ChartSeries] = []
+        let totalSum = totalPoints.reduce(0) { $0 + $1.1 }
+        if totalSum > 0 || !modelSeries.isEmpty {
+            series.append(ChartSeries(
+                name: kind.name,
+                points: totalPoints.map { DailyTokenUsage(day: $0.0, tokens: $0.1) },
+                color: kind.tint,
+                isPrimary: true
+            ))
+        }
+        for (index, model) in modelSeries.enumerated() where model.total > 0 {
+            series.append(ChartSeries(
+                name: model.model,
+                points: model.points,
+                color: modelTint(kind.tint, index: index),
+                isPrimary: false
+            ))
+        }
+        return series
     }
 
     /// 当前页锚定的窗口末日：pageOffset 为 0 时是今天，每翻一页回退一个周期。
@@ -308,6 +431,19 @@ struct TrendChartPager: View {
             let start = cal.date(byAdding: .day, value: -(period.days - 1), to: end) ?? end
             return "\(start.formatted(.dateTime.year().month(.wide))) – \(end.formatted(.dateTime.year().month(.wide)))"
         }
+    }
+
+    /// 图例条目：单厂商作用域用各模型，否则用各厂商；都只列实际有数据的序列。
+    /// 单厂商时通常排除总量条目——它已由堆叠柱高表达，图例重复列出反而误导。
+    /// 例外：该厂商没有模型维度时（图上画的就是总量那根柱），图例保留它，否则图例会空。
+    private var legendEntries: [ChartSeries] {
+        if isSingleProvider {
+            let all = period == .today ? (hourlySeries ?? []) : (dailySeries ?? [])
+            let models = all.filter { !$0.isPrimary }
+            return models.isEmpty ? all : models
+        }
+        let kinds = self.legendKinds
+        return kinds.map { ChartSeries(name: $0.name, points: [], color: $0.tint, isPrimary: true) }
     }
 
     /// 当前页实际有数据的厂商（图例行用）。
@@ -672,6 +808,435 @@ struct ContributionGrid: View {
                     Text((trend.days.first { $0.day == day }?.tokens ?? 0)
                         .formatted(.number.notation(.compactName)))
                         .monospacedDigit()
+                }
+            }
+        }
+        .font(.caption2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(width: 122)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.secondary.opacity(0.2), lineWidth: 0.5)
+        )
+    }
+}
+
+// MARK: - 单厂商堆叠柱图（各模型堆叠，总量只在悬停气泡显示）
+
+/// 单厂商逐日图：各模型**堆叠**成柱，柱高即当日总量。
+///
+/// 为什么不用「总量曲线 + 各模型曲线」：当某个模型占绝对多数（如 DeepSeek 单一模型 100%）时，
+/// 总量曲线与该模型曲线完全重合，两条线互相遮挡，既看不出总量也看不出模型占比。
+/// 堆叠柱天然规避这个问题——总量由柱高表达（不再单独画一条线），各模型由堆叠分段表达，
+/// 占比一眼可见；具体总量值在悬停气泡里给出。
+///
+/// series 里 isPrimary 的那条（总量）**不参与绘制**，只用于气泡里的总量显示。
+/// 例外：若该厂商没有模型维度（modelSeries 为空，如尚未解析出模型的历史数据），
+/// 则退回「画总量一根柱」，否则图表会整个空白。
+struct MultiSeriesTrendChart: View {
+    let series: [ChartSeries]
+    let tint: Color
+    @State private var hoverDay: Date?
+    @State private var hoverX: CGFloat = 0
+
+    /// 总量序列（气泡里显示；无模型时退回作为唯一的柱）。
+    private var totalSeries: ChartSeries? { series.first { $0.isPrimary } }
+    /// 参与堆叠的模型序列。无模型维度时退回总量那一根柱，避免空白图。
+    private var modelSeries: [ChartSeries] {
+        let models = series.filter { !$0.isPrimary }
+        if !models.isEmpty { return models }
+        return totalSeries.map { [$0.replacingPrimary(false)] } ?? []
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            Chart {
+                ForEach(modelSeries) { item in
+                    barMarks(for: item)
+                }
+                if let hoverDay {
+                    RuleMark(x: .value("日期", hoverDay))
+                        .foregroundStyle(.secondary.opacity(0.4))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                }
+            }
+            .chartLegend(.hidden)
+            .chartXAxis(.hidden)
+            .chartYAxis(.hidden)
+            .chartYScale(domain: 0...yUpperBound)
+            .chartForegroundStyleScale(
+                domain: modelSeries.map(\.name),
+                range: modelSeries.map(\.color)
+            )
+            .chartOverlay { proxy in
+                Rectangle().fill(.clear).contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            hoverX = location.x
+                            if let date: Date = proxy.value(atX: location.x) {
+                                hoverDay = nearestDay(to: date)
+                            }
+                        case .ended:
+                            hoverDay = nil
+                        }
+                    }
+            }
+            .overlay(alignment: .topLeading) {
+                if let hoverDay {
+                    tooltip(for: hoverDay)
+                        .offset(x: min(max(hoverX - 60, 0), max(geo.size.width - 122, 0)), y: 0)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    /// 纵轴上界：按**各模型当日合计**（即柱高）取最大值，再留 12% 留白避免柱子贴顶被裁切。
+    /// 不直接用总量序列，避免总量与模型之和不一致时轴范围失真。全为 0 时给非零上界防退化。
+    private var yUpperBound: Double {
+        var maxValue = 0
+        for item in modelSeries {
+            for point in item.points { maxValue = max(maxValue, point.tokens) }
+        }
+        return maxValue > 0 ? Double(maxValue) * 1.12 : 1
+    }
+
+    /// 单个模型的堆叠柱段：同一自然日的各模型自动堆叠，柱高即合计。
+    @ChartContentBuilder
+    private func barMarks(for item: ChartSeries) -> some ChartContent {
+        ForEach(item.points, id: \.day) { point in
+            BarMark(
+                x: .value("日期", point.day, unit: .day),
+                y: .value("Tokens", point.tokens),
+                width: .ratio(0.6)
+            )
+            .foregroundStyle(by: .value("序列", item.name))
+            // 悬停时聚焦当天：当天柱子全不透明，其余日期淡化
+            .opacity(hoverDay == nil || hoverDay == point.day ? 1 : 0.35)
+        }
+    }
+
+    private func nearestDay(to date: Date) -> Date? {
+        series.first?.points.min(by: {
+            abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date))
+        })?.day
+    }
+
+    /// 悬停气泡：总量置顶（图上不再画，只在这里给具体值），其下为各模型分段。
+    private func tooltip(for day: Date) -> some View {
+        let total = totalSeries?.points.first { $0.day == day }?.tokens
+            ?? modelSeries.reduce(0) { $0 + ($1.points.first { $0.day == day }?.tokens ?? 0) }
+        return VStack(alignment: .leading, spacing: 3) {
+            Text(day.formatted(.dateTime.month(.wide).day().weekday(.abbreviated)))
+                .fontWeight(.semibold)
+            HStack(spacing: 4) {
+                Text("总用量")
+                Spacer()
+                Text(total.formatted(.number.notation(.compactName)))
+                    .monospacedDigit()
+                    .fontWeight(.semibold)
+            }
+            Divider().opacity(0.4)
+            ForEach(modelSeries) { item in
+                HStack(spacing: 4) {
+                    Rectangle().fill(item.color).frame(width: 5, height: 5)
+                    Text(item.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text((item.points.first { $0.day == day }?.tokens ?? 0)
+                        .formatted(.number.notation(.compactName)))
+                        .monospacedDigit()
+                }
+            }
+        }
+        .font(.caption2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(width: 122)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.secondary.opacity(0.2), lineWidth: 0.5)
+        )
+    }
+}
+
+/// 单厂商逐小时堆叠柱图：口径与 MultiSeriesTrendChart 完全相同（含无模型维度时退回总量柱），
+/// 只是横轴单位为小时。
+struct MultiSeriesHourlyChart: View {
+    let series: [ChartSeries]
+    let tint: Color
+    @State private var hoverHour: Date?
+    @State private var hoverX: CGFloat = 0
+
+    /// 总量序列（气泡里显示；无模型时退回作为唯一的柱）。
+    private var totalSeries: ChartSeries? { series.first { $0.isPrimary } }
+    /// 参与堆叠的模型序列。无模型维度时退回总量那一根柱，避免空白图。
+    private var modelSeries: [ChartSeries] {
+        let models = series.filter { !$0.isPrimary }
+        if !models.isEmpty { return models }
+        return totalSeries.map { [$0.replacingPrimary(false)] } ?? []
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            Chart {
+                ForEach(modelSeries) { item in
+                    barMarks(for: item)
+                }
+                if let hoverHour {
+                    RuleMark(x: .value("时间", hoverHour))
+                        .foregroundStyle(.secondary.opacity(0.4))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                }
+            }
+            .chartLegend(.hidden)
+            .chartXAxis(.hidden)
+            .chartYAxis(.hidden)
+            .chartYScale(domain: 0...yUpperBound)
+            .chartForegroundStyleScale(
+                domain: modelSeries.map(\.name),
+                range: modelSeries.map(\.color)
+            )
+            .chartOverlay { proxy in
+                Rectangle().fill(.clear).contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            hoverX = location.x
+                            if let date: Date = proxy.value(atX: location.x) {
+                                hoverHour = nearestHour(to: date)
+                            }
+                        case .ended:
+                            hoverHour = nil
+                        }
+                    }
+            }
+            .overlay(alignment: .topLeading) {
+                if let hoverHour {
+                    tooltip(for: hoverHour)
+                        .offset(x: min(max(hoverX - 60, 0), max(geo.size.width - 122, 0)), y: 0)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    /// 纵轴上界：按各模型合计（柱高）取最大值并留 12% 留白（与逐日图口径一致）。
+    private var yUpperBound: Double {
+        var maxValue = 0
+        for item in modelSeries {
+            for point in item.points { maxValue = max(maxValue, point.tokens) }
+        }
+        return maxValue > 0 ? Double(maxValue) * 1.12 : 1
+    }
+
+    /// 单个模型的堆叠柱段（按小时分桶）。
+    @ChartContentBuilder
+    private func barMarks(for item: ChartSeries) -> some ChartContent {
+        ForEach(item.points, id: \.day) { point in
+            BarMark(
+                x: .value("时间", point.day, unit: .hour),
+                y: .value("Tokens", point.tokens),
+                width: .ratio(0.6)
+            )
+            .foregroundStyle(by: .value("序列", item.name))
+            .opacity(hoverHour == nil || hoverHour == point.day ? 1 : 0.35)
+        }
+    }
+
+    private func nearestHour(to date: Date) -> Date? {
+        series.first?.points.min(by: {
+            abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date))
+        })?.day
+    }
+
+    private func tooltip(for hour: Date) -> some View {
+        let total = totalSeries?.points.first { $0.day == hour }?.tokens
+            ?? modelSeries.reduce(0) { $0 + ($1.points.first { $0.day == hour }?.tokens ?? 0) }
+        return VStack(alignment: .leading, spacing: 3) {
+            Text(hour.formatted(.dateTime.month(.wide).day().hour()))
+                .fontWeight(.semibold)
+            HStack(spacing: 4) {
+                Text("总用量")
+                Spacer()
+                Text(total.formatted(.number.notation(.compactName)))
+                    .monospacedDigit()
+                    .fontWeight(.semibold)
+            }
+            Divider().opacity(0.4)
+            ForEach(modelSeries) { item in
+                HStack(spacing: 4) {
+                    Rectangle().fill(item.color).frame(width: 5, height: 5)
+                    Text(item.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text((item.points.first { $0.day == hour }?.tokens ?? 0)
+                        .formatted(.number.notation(.compactName)))
+                        .monospacedDigit()
+                }
+            }
+        }
+        .font(.caption2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(width: 122)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.secondary.opacity(0.2), lineWidth: 0.5)
+        )
+    }
+}
+
+/// 单厂商近一年点阵图：格子深浅按当日**总用量**着色（与总览一致，便于横向比较），
+/// 悬停气泡列出当天总量 + 各模型明细。
+struct MultiSeriesContributionGrid: View {
+    let series: [ChartSeries]
+    @State private var hoverDay: Date?
+    @State private var hoverColumn = 0
+
+    private static let cellSize: CGFloat = 10
+    private static let cellSpacing: CGFloat = 3
+    private static let columnWidth = cellSize + cellSpacing
+    private static let monthLabelHeight: CGFloat = 14
+
+    /// 总用量序列（第 0 条）的逐日值；点阵用它的日期轴与着色。
+    private var primary: ChartSeries? { series.first { $0.isPrimary } ?? series.first }
+
+    private var totals: [Date: Int] {
+        var result: [Date: Int] = [:]
+        for item in primary?.points ?? [] { result[item.day] = item.tokens }
+        return result
+    }
+
+    private var days: [DailyTokenUsage] { primary?.points ?? [] }
+
+    private var weeks: [[Date?]] {
+        guard !days.isEmpty else { return [] }
+        let cal = Calendar(identifier: .gregorian)
+        let weekday = cal.component(.weekday, from: days[0].day)
+        let leading = (weekday + 5) % 7
+        let cells = Array(repeating: nil, count: leading) + days.map { Optional($0.day) }
+        var result: [[Date?]] = []
+        for chunkStart in stride(from: 0, to: cells.count, by: 7) {
+            var week = Array(cells[chunkStart..<min(chunkStart + 7, cells.count)])
+            while week.count < 7 { week.append(nil) }
+            result.append(week)
+        }
+        return result
+    }
+
+    private var monthLabels: [(column: Int, text: String)] {
+        let cal = Calendar(identifier: .gregorian)
+        return weeks.enumerated().compactMap { index, week in
+            for case let day? in week where cal.component(.day, from: day) == 1 {
+                return (index, day.formatted(.dateTime.month(.wide)))
+            }
+            return nil
+        }
+    }
+
+    var body: some View {
+        let totals = self.totals
+        let maxTokens = totals.values.max() ?? 0
+        let weeks = self.weeks
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 4) {
+                    ZStack(alignment: .topLeading) {
+                        Color.clear.frame(
+                            width: CGFloat(weeks.count) * Self.columnWidth,
+                            height: Self.monthLabelHeight
+                        )
+                        ForEach(monthLabels, id: \.column) { label in
+                            Text(label.text)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                                .offset(x: CGFloat(label.column) * Self.columnWidth)
+                        }
+                    }
+
+                    HStack(spacing: Self.cellSpacing) {
+                        ForEach(Array(weeks.enumerated()), id: \.offset) { column, week in
+                            VStack(spacing: Self.cellSpacing) {
+                                ForEach(Array(week.enumerated()), id: \.offset) { _, cell in
+                                    if let day = cell {
+                                        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                            .fill(color(for: totals[day] ?? 0, max: maxTokens))
+                                            .frame(width: Self.cellSize, height: Self.cellSize)
+                                            .onHover { hovering in
+                                                if hovering {
+                                                    hoverDay = day
+                                                    hoverColumn = column
+                                                } else if hoverDay == day {
+                                                    hoverDay = nil
+                                                }
+                                            }
+                                    } else {
+                                        Color.clear.frame(width: Self.cellSize, height: Self.cellSize)
+                                    }
+                                }
+                            }
+                            .id(column)
+                        }
+                    }
+                }
+                .padding(.horizontal, 2)
+                .overlay(alignment: .topLeading) {
+                    if let hoverDay {
+                        tooltip(for: hoverDay)
+                            .offset(x: tooltipX, y: Self.monthLabelHeight + 4)
+                            .allowsHitTesting(false)
+                    }
+                }
+            }
+            .onAppear { proxy.scrollTo(weeks.count - 1, anchor: .trailing) }
+            .onChange(of: weeks.count) { _, count in
+                proxy.scrollTo(count - 1, anchor: .trailing)
+            }
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private var tooltipX: CGFloat {
+        let gridWidth = CGFloat(weeks.count) * Self.columnWidth
+        let centerX = CGFloat(hoverColumn) * Self.columnWidth + Self.cellSize / 2 + 2
+        return min(max(centerX - 61, 0), max(gridWidth - 122, 0))
+    }
+
+    private func color(for tokens: Int, max maxTokens: Int) -> Color {
+        guard tokens > 0, maxTokens > 0 else { return Color.primary.opacity(0.05) }
+        switch Double(tokens) / Double(maxTokens) {
+        case ..<0.25: return .accentColor.opacity(0.25)
+        case ..<0.5: return .accentColor.opacity(0.45)
+        case ..<0.75: return .accentColor.opacity(0.7)
+        default: return .accentColor
+        }
+    }
+
+    private func tooltip(for day: Date) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(day.formatted(.dateTime.month(.wide).day().weekday(.abbreviated)))
+                .fontWeight(.semibold)
+            ForEach(series) { item in
+                HStack(spacing: 4) {
+                    Circle().fill(item.color).frame(width: 5, height: 5)
+                    Text(item.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text((item.points.first { $0.day == day }?.tokens ?? 0)
+                        .formatted(.number.notation(.compactName)))
+                        .monospacedDigit()
+                        .fontWeight(item.isPrimary ? .semibold : .regular)
                 }
             }
         }

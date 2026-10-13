@@ -181,3 +181,70 @@ private var todayStartUTC: TimeInterval {
     #expect(PlanTier.tokenPlan < PlanTier.api)
     #expect(PlanTier.api < PlanTier.free)
 }
+
+/// DeepSeek 模型维度：接口 series[] 按 model × api_key 展开，需按 model 分桶而非拍平。
+@Test func deepSeekSplitsUsageByModel() {
+    // 用「今天」的东八区零点做 bucket 时间，确保落在 periodStats 的近 30 天窗口内
+    let bucketTime = todayStartUTC
+    let amount: [String: Any] = [
+        "code": 0, "data": ["biz_code": 0, "biz_data": [
+            "bucket": 86400,
+            "models": ["deepseek-chat", "deepseek-reasoner"],
+            "series": [
+                // 同一模型的两个 api_key：必须合并到同一个模型桶
+                ["api_key": ["name": "key-a"], "model": "deepseek-chat",
+                 "buckets": [["time": bucketTime, "usage": [
+                    "PROMPT_CACHE_HIT_TOKEN": 100, "PROMPT_CACHE_MISS_TOKEN": 200,
+                    "REQUEST": 5, "RESPONSE_TOKEN": 300]]]],
+                ["api_key": ["name": "key-b"], "model": "deepseek-chat",
+                 "buckets": [["time": bucketTime, "usage": [
+                    "PROMPT_CACHE_HIT_TOKEN": 10, "PROMPT_CACHE_MISS_TOKEN": 20,
+                    "REQUEST": 1, "RESPONSE_TOKEN": 30]]]],
+                ["api_key": ["name": "key-a"], "model": "deepseek-reasoner",
+                 "buckets": [["time": bucketTime, "usage": [
+                    "PROMPT_CACHE_HIT_TOKEN": 0, "PROMPT_CACHE_MISS_TOKEN": 40,
+                    "REQUEST": 2, "RESPONSE_TOKEN": 60]]]]
+            ]
+        ]]
+    ]
+    let payload: [String: Any] = ["/api/v0/usage/by_api_key/amount": amount]
+    let web = DeepSeekProvider.parseWebPayload(payload)
+    #expect(web != nil)
+    // 总量口径不变（各模型求和）
+    #expect(web?.tokenUsage == 760)
+    #expect(web?.requestCount == 8)
+
+    let day = east8DayKey(Date(timeIntervalSince1970: TimeInterval(bucketTime)))
+    let byModel = web?.dailyTokensByModel ?? [:]
+    // 同一模型的两个 key 合并：600 + 60
+    #expect(byModel["deepseek-chat"]?[day] == 660)
+    #expect(byModel["deepseek-reasoner"]?[day] == 100)
+    // 模型之和 = 逐日总量
+    let modelTotal = byModel.values.reduce(0) { $0 + $1.values.reduce(0, +) }
+    let dailyTotal = (web?.dailyTokens ?? [:]).values.reduce(0, +)
+    #expect(modelTotal == dailyTotal)
+
+    // 组装成图表序列：过滤零用量、按合计降序
+    let stats = DeepSeekProvider.periodStats(web?.dailyTokens ?? [:])
+    let series = DeepSeekProvider.dailyModelSeries(byModel, days: stats.daily.map(\.day))
+    #expect(series?.count == 2)
+    #expect(series?.first?.model == "deepseek-chat")
+    #expect(series?.first?.total == 660)
+    #expect(series?.reduce(0) { $0 + $1.total } == dailyTotal)
+}
+
+/// 缺 model 字段的 series 归入 unknownModel，总量不变。
+@Test func deepSeekModelFallsBackToUnknown() {
+    let amount: [String: Any] = [
+        "code": 0, "data": ["biz_code": 0, "biz_data": [
+            "series": [["api_key": ["name": "k"], "buckets": [[
+                "time": todayStartUTC,
+                "usage": ["PROMPT_CACHE_HIT_TOKEN": 0, "PROMPT_CACHE_MISS_TOKEN": 70,
+                          "REQUEST": 1, "RESPONSE_TOKEN": 30]]]]]
+        ]]
+    ]
+    let web = DeepSeekProvider.parseWebPayload(["/api/v0/usage/by_api_key/amount": amount])
+    #expect(web?.tokenUsage == 100)
+    let day1 = east8DayKey(Date(timeIntervalSince1970: TimeInterval(todayStartUTC)))
+    #expect(web?.dailyTokensByModel[CodexLocalLogs.unknownModel]?[day1] == 100)
+}

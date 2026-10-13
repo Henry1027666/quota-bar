@@ -103,3 +103,60 @@ import Testing
 
     try FileManager.default.removeItem(at: root)
 }
+
+/// 模型维度：usage.record 自带 model 字段，按模型拆分且合计等于总量。
+@Test func kimiCodeLocalLogsSplitsByModel() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("kimi-model-\(UUID().uuidString)")
+    let sessions = root.appendingPathComponent("sessions")
+    let dayStart = Calendar(identifier: .gregorian).startOfDay(for: Date())
+
+    func write(tokens: Int, agent: String, model: String, day: Date) throws {
+        let dir = sessions.appendingPathComponent("wd_test/session_\(agent)/agents/\(agent)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let ms = Int(day.addingTimeInterval(12 * 3600).timeIntervalSince1970 * 1000)
+        let line = """
+        {"type":"usage.record","model":"\(model)","usage":{"inputOther":\(tokens - 100),"output":100,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":\(ms)}
+        """
+        try line.write(to: dir.appendingPathComponent("wire.jsonl"), atomically: true, encoding: .utf8)
+    }
+
+    try write(tokens: 1000, agent: "main", model: "kimi-code/k3", day: dayStart)
+    try write(tokens: 400, agent: "agent-1", model: "kimi-code/k2", day: dayStart)
+    try write(tokens: 300, agent: "agent-2", model: "kimi-code/k3", day: dayStart.addingTimeInterval(-2 * 86400))
+
+    let byModel = KimiCodeLocalLogs.dailyTokensByModel(sessionsRoot: sessions, days: 7, now: Date())
+    let totals = Dictionary(uniqueKeysWithValues: byModel.map { ($0.model, $0.total) })
+    #expect(totals["kimi-code/k3"] == 1300)
+    #expect(totals["kimi-code/k2"] == 400)
+    // 按合计降序
+    #expect(byModel.map(\.model) == ["kimi-code/k3", "kimi-code/k2"])
+    // 模型之和 = 总量
+    let daily = KimiCodeLocalLogs.dailyTokens(sessionsRoot: sessions, days: 7, now: Date())
+    #expect(daily.reduce(0) { $0 + $1.tokens } == byModel.reduce(0) { $0 + $1.total })
+
+    try FileManager.default.removeItem(at: root)
+}
+
+/// 缺 model 字段时归入 unknownModel，总量不变。
+@Test func kimiCodeLocalLogsFallsBackToUnknownModel() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("kimi-unknown-\(UUID().uuidString)")
+    let sessions = root.appendingPathComponent("sessions")
+    let dayStart = Calendar(identifier: .gregorian).startOfDay(for: Date())
+    let dir = sessions.appendingPathComponent("wd_test/session_a/agents/main")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let ms = Int(dayStart.addingTimeInterval(12 * 3600).timeIntervalSince1970 * 1000)
+    let line = """
+    {"type":"usage.record","usage":{"inputOther":100,"output":100,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":\(ms)}
+    """
+    try line.write(to: dir.appendingPathComponent("wire.jsonl"), atomically: true, encoding: .utf8)
+
+    let byModel = KimiCodeLocalLogs.dailyTokensByModel(sessionsRoot: sessions, days: 7, now: Date())
+    #expect(byModel.count == 1)
+    #expect(byModel.first?.model == KimiCodeLocalLogs.unknownModel)
+    #expect(byModel.first?.total == 200)
+    #expect(KimiCodeLocalLogs.tokenTotals(sessionsRoot: sessions, now: Date()).today == 200)
+
+    try FileManager.default.removeItem(at: root)
+}

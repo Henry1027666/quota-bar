@@ -1,61 +1,5 @@
 import Foundation
 
-struct ClaudeProvider: QuotaProvider {
-    let kind = ProviderKind.claude
-
-    func fetch() async throws -> ProviderSnapshot {
-        guard let raw = try? Support.run(
-            "/usr/bin/security",
-            ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        ) else {
-            throw QuotaError.notAuthenticated("Claude Code 尚未登录")
-        }
-        guard let data = raw.data(using: .utf8),
-              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = root["claudeAiOauth"] as? [String: Any],
-              let token = Support.string(oauth["accessToken"] ?? oauth["access_token"]) else {
-            throw QuotaError.notAuthenticated("Claude Code 尚未登录")
-        }
-        let payload = try await Support.jsonRequest(
-            URL(string: "https://api.anthropic.com/api/oauth/usage")!,
-            bearer: token,
-            headers: ["anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code"]
-        )
-        let dictionary = payload as? [String: Any] ?? [:]
-        var windows: [QuotaWindow] = []
-        let legacy: [(String, String)] = [("five_hour", "5 小时"), ("seven_day", "周限额")]
-        for (key, title) in legacy {
-            guard let row = dictionary[key] as? [String: Any] else { continue }
-            let percent = Support.firstNumber(in: row, keys: ["utilization", "percent", "used_percent"]) ?? 0
-            let reset = Support.date(Support.firstValue(in: row, keys: ["resets_at", "reset_at"]))
-            windows.append(QuotaWindow(title: title, used: percent, limit: 100, resetAt: reset))
-        }
-        if let limits = dictionary["limits"] as? [[String: Any]] {
-            for row in limits {
-                guard let percent = Support.firstNumber(in: row, keys: ["percent", "utilization"]) else { continue }
-                let group = Support.firstString(in: row, keys: ["group", "kind"])?.lowercased() ?? ""
-                let title = group.contains("session") ? "5 小时" : "周限额"
-                let reset = Support.date(Support.firstValue(in: row, keys: ["resets_at", "reset_at"]))
-                if !windows.contains(where: { $0.title == title && $0.resetAt == reset }) {
-                    windows.append(QuotaWindow(title: title, used: percent, limit: 100, resetAt: reset))
-                }
-            }
-        }
-        let claims = Support.jwtClaims(token)
-        return ProviderSnapshot(
-            kind: kind,
-            plan: Support.string(root["subscriptionType"] ?? root["rateLimitTier"]),
-            account: Support.string(claims?["email"]),
-            windows: windows,
-            balances: [],
-            tokenUsage: nil,
-            requestCount: nil,
-            updatedAt: Date(),
-            message: windows.isEmpty ? "服务未返回额度窗口" : nil
-        )
-    }
-}
-
 struct KimiProvider: QuotaProvider {
     let kind = ProviderKind.kimi
 
@@ -315,6 +259,9 @@ struct DeepSeekProvider: QuotaProvider {
         var tokenBreakdown: TokenBreakdown?
         var dailyTokens: [DailyTokenUsage]?
         var hourlyTokens: [HourlyTokenUsage]?
+        /// 逐日 / 逐小时序列的模型维度（单厂商曲线图用）
+        var dailyByModel: [ModelTokenSeries]?
+        var hourlyByModel: [ModelTokenSeries]?
         var message: String?
         if let webToken = discoverWebToken() {
             Log.append("DS", "发现网页会话 token (前缀 \(webToken.prefix(12))…)，拉取用量接口")
@@ -329,9 +276,17 @@ struct DeepSeekProvider: QuotaProvider {
                     tokenUsage = stats.today
                     tokenBreakdown = stats.breakdown
                     dailyTokens = stats.daily
+                    // 模型维度：按同一条近 30 天日期轴铺成逐日序列（缺失日期补 0），
+                    // 与 dailyTokens 口径一致，供单厂商曲线图叠加各模型细线。
+                    dailyByModel = Self.dailyModelSeries(
+                        web.dailyTokensByModel, days: stats.daily.map(\.day)
+                    )
                 }
                 if !web.hourlyTokens.isEmpty {
                     hourlyTokens = web.hourlyTokens
+                    hourlyByModel = Self.hourlyModelSeries(
+                        web.hourlyTokensByModel, hours: web.hourlyTokens.map(\.hour)
+                    )
                 }
                 Log.append("DS", "用量接口成功: balances=\(web.balances.count) tokens=\(String(describing: web.tokenUsage)) req=\(String(describing: web.requestCount))")
                 if web.isEmpty { message = "网页用量接口未返回数据" }
@@ -358,6 +313,8 @@ struct DeepSeekProvider: QuotaProvider {
         snapshot.tokenBreakdown = tokenBreakdown
         snapshot.dailyTokens = dailyTokens
         snapshot.hourlyTokens = hourlyTokens
+        snapshot.dailyTokensByModel = dailyByModel
+        snapshot.hourlyTokensByModel = hourlyByModel
         // 网页接口最多返回近 30 天，「近一年」口径下只覆盖这段（视图层与图表一致）
         snapshot.last365Tokens = dailyTokens?.reduce(0) { $0 + $1.tokens }
         return snapshot
@@ -368,6 +325,35 @@ struct DeepSeekProvider: QuotaProvider {
         balances.append(contentsOf: web.balances)
         tokenUsage = web.tokenUsage
         requestCount = web.requestCount
+    }
+
+    /// 把「模型 → 东八区 day key → tokens」铺成与 dailyTokens 同轴的逐日序列。
+    /// 只保留窗口内有数据的模型，按合计降序；无数据返回 nil。
+    static func dailyModelSeries(_ byModel: [String: [String: Int]], days: [Date]) -> [ModelTokenSeries]? {
+        guard !byModel.isEmpty, !days.isEmpty else { return nil }
+        let series = byModel.compactMap { model, perDay -> ModelTokenSeries? in
+            let points = days.map { day in
+                DailyTokenUsage(day: day, tokens: perDay[dayKeyFormatter.string(from: day)] ?? 0)
+            }
+            let series = ModelTokenSeries(model: model, points: points)
+            return series.total > 0 ? series : nil
+        }
+        .sorted { $0.total > $1.total }
+        return series.isEmpty ? nil : series
+    }
+
+    /// 把「模型 → 小时 epoch → tokens」铺成与 hourlyTokens 同轴的逐小时序列。
+    static func hourlyModelSeries(_ byModel: [String: [Int: Int]], hours: [Date]) -> [ModelTokenSeries]? {
+        guard !byModel.isEmpty, !hours.isEmpty else { return nil }
+        let series = byModel.compactMap { model, perHour -> ModelTokenSeries? in
+            let points = hours.map { hour in
+                DailyTokenUsage(day: hour, tokens: perHour[Int(hour.timeIntervalSince1970)] ?? 0)
+            }
+            let series = ModelTokenSeries(model: model, points: points)
+            return series.total > 0 ? series : nil
+        }
+        .sorted { $0.total > $1.total }
+        return series.isEmpty ? nil : series
     }
 
     // MARK: - 网页端用量（platform.deepseek.com，需登录态）
@@ -382,8 +368,13 @@ struct DeepSeekProvider: QuotaProvider {
         var requestCount: Int?
         /// 逐日 token 数（东八区 "yyyy-MM-dd" → tokens），来自 amount 接口的逐日 bucket。
         var dailyTokens: [String: Int] = [:]
+        /// 逐日 token 数按模型拆分（模型名 → 东八区 "yyyy-MM-dd" → tokens）。
+        /// 接口的 series[] 本就按 model × api_key 展开，旧实现直接拍平求和丢掉了这个维度。
+        var dailyTokensByModel: [String: [String: Int]] = [:]
         /// 今日逐小时 token 数（范围缩到一天时 amount 接口自动返回 3600s bucket，实测）。
         var hourlyTokens: [HourlyTokenUsage] = []
+        /// 今日逐小时 token 数按模型拆分（模型名 → 小时起点 epoch → tokens）。
+        var hourlyTokensByModel: [String: [Int: Int]] = [:]
         var isEmpty: Bool { balances.isEmpty && tokenUsage == nil && requestCount == nil }
     }
 
@@ -490,12 +481,16 @@ struct DeepSeekProvider: QuotaProvider {
 
     /// by_api_key/amount：series[].buckets[].usage 逐日求和（近 30 天请求数 / Tokens），
     /// 并按 bucket 的 time（东八区逐日 bucket）保留逐日 token 数，供精确周期统计与趋势图。
+    /// 同时按 series[].model 分桶，保留模型维度（单厂商曲线图用）。
     private static func parseAmount(_ json: Any, into result: inout WebUsage) {
         guard let biz = bizData(json),
               let series = biz["series"] as? [[String: Any]] else { return }
         var requests = 0
         var tokens = 0
         for item in series {
+            // series 每项对应一个 model × api_key 组合；缺 model 时归入 unknownModel
+            let model = (item["model"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ?? CodexLocalLogs.unknownModel
             for bucket in (item["buckets"] as? [[String: Any]] ?? []) {
                 guard let usage = bucket["usage"] as? [String: Any] else { continue }
                 requests += Int(Support.firstNumber(in: usage, keys: ["REQUEST"]) ?? 0)
@@ -506,6 +501,7 @@ struct DeepSeekProvider: QuotaProvider {
                 if let t = Support.firstNumber(in: bucket, keys: ["time"]) {
                     let day = dayKeyFormatter.string(from: Date(timeIntervalSince1970: t))
                     result.dailyTokens[day, default: 0] += bucketTokens
+                    result.dailyTokensByModel[model, default: [:]][day, default: 0] += bucketTokens
                 }
             }
         }
@@ -515,11 +511,14 @@ struct DeepSeekProvider: QuotaProvider {
 
     /// by_api_key/amount 的今日范围响应（bucket=3600）：逐小时 token 数。
     /// bucket.time 是东八区整点 epoch，直接作为该小时的起始时刻。
+    /// 同时按 series[].model 分桶，保留模型维度。
     private static func parseHourly(_ json: Any, into result: inout WebUsage) {
         guard let biz = bizData(json),
               let series = biz["series"] as? [[String: Any]] else { return }
         var perHour: [Int: Int] = [:]
         for item in series {
+            let model = (item["model"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ?? CodexLocalLogs.unknownModel
             for bucket in (item["buckets"] as? [[String: Any]] ?? []) {
                 guard let usage = bucket["usage"] as? [String: Any],
                       let t = Support.firstNumber(in: bucket, keys: ["time"]) else { continue }
@@ -527,6 +526,7 @@ struct DeepSeekProvider: QuotaProvider {
                     + Int(Support.firstNumber(in: usage, keys: ["PROMPT_CACHE_MISS_TOKEN"]) ?? 0)
                     + Int(Support.firstNumber(in: usage, keys: ["RESPONSE_TOKEN", "COMPLETION_TOKEN"]) ?? 0)
                 perHour[Int(t), default: 0] += tokens
+                result.hourlyTokensByModel[model, default: [:]][Int(t), default: 0] += tokens
             }
         }
         result.hourlyTokens = perHour.keys.sorted().map {

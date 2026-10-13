@@ -13,7 +13,7 @@ final class QuotaStore: ObservableObject {
     private(set) var lastRefreshedAt: Date?
 
     private let providers: [any QuotaProvider] = [
-        CodexProvider(), ClaudeProvider(), KimiProvider(), DeepSeekProvider()
+        CodexProvider(), KimiProvider(), DeepSeekProvider()
     ]
 
     /// 周期刷新任务句柄：设置页修改刷新频率后取消旧任务、按新间隔重启。
