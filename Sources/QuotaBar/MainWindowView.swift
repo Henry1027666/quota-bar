@@ -273,17 +273,13 @@ private struct OverviewView: View {
                 }
             }
 
-            // DeepSeek 网页用量需应用内登录一次
+            // DeepSeek 用量取自 DeepSeek Harness 的本地登录凭据；
+            // 本应用不再提供登录入口，未登录时提示去 DSH 登录。
             if kind == .deepSeek, snapshot.tokenUsage == nil, snapshot.requestCount == nil {
-                Button {
-                    DeepSeekWebSession.shared.showLoginWindow()
-                } label: {
-                    Label("登录 DeepSeek 获取今日用量", systemImage: "person.crop.circle.badge.plus")
-                        .font(.callout)
-                        .foregroundStyle(kind.tint)
-                }
-                .buttonStyle(.plain)
-                .help("在应用内登录 DeepSeek 开放平台，自动统计今日调用次数与消耗")
+                Label("在 DeepSeek Harness 中登录后即可自动统计用量",
+                      systemImage: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
 
             if let message = snapshot.message {
@@ -358,13 +354,14 @@ private struct SettingsView: View {
             }
             Section("DeepSeek") {
                 HStack {
+                    Text("登录状态")
+                    Spacer()
                     Text(deepSeekStatus)
                         .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("打开登录窗口") {
-                        DeepSeekWebSession.shared.showLoginWindow()
-                    }
                 }
+                Text("登录凭据取自 DeepSeek Harness（~/.dsh），请在其应用内完成登录；本应用不要求单独登录。")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
         }
         .formStyle(.grouped)
@@ -375,9 +372,9 @@ private struct SettingsView: View {
     private var deepSeekStatus: String {
         switch store.states[.deepSeek] {
         case .ready(let snapshot):
-            return snapshot.tokenUsage != nil || snapshot.requestCount != nil ? "已登录（网页用量统计开启）" : "已连接"
+            return snapshot.tokenUsage != nil || snapshot.requestCount != nil ? "已登录（用量统计开启）" : "已连接"
         case .notDetected:
-            return "未登录"
+            return "未检测到 DSH 登录"
         case .unavailable:
             return "登录已失效或不可用"
         case .loading, .none:

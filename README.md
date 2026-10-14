@@ -11,8 +11,13 @@
 * **Codex**：5 小时 / 周额度与重置时间；token 用量由本地会话日志（`~/.codex/sessions`）逐日精确统计
 * **Kimi Code**：同时发现 `~/.kimi-code`（VS Code 扩展 / 新版客户端）和 `~/.kimi`（旧版 CLI），
   展示 5 小时 / 周 / 月额度、Extra Usage 余额；token 用量由本地会话日志（`~/.kimi-code/sessions`）逐日精确统计
-* **DeepSeek**：同时发现环境变量、DeepSeek Harness 的 `~/.dsh/.credentials.yaml` 与常见客户端配置；
-  展示 API 余额、累计 / 今日消费。面板内嵌登录开放平台后，token 用量按接口逐日 bucket 精确统计
+* **DeepSeek**：**登录凭据直接取自 DeepSeek Harness（`~/.dsh/.credentials.yaml`）**，
+  用户在 DSH 里登录后即可自动统计，本应用不再提供单独的登录入口，也不需要 API Key。
+  展示余额（充值 / 赠送 / 累计消费）与逐日 token 用量、按模型拆分。
+
+> DeepSeek 的账户接口用 DSH 的自定义头 `x-dsh-auth-token` 认证——它的凭据不是 JWT，
+> 用 `Authorization: Bearer` 会被拒（`code 40003`）。早期版本靠内嵌 WKWebView 登录并收割
+> localStorage JWT，现已整套移除。
 
 综合趋势曲线展示近 7 天逐日 token 用量（每家一条彩色曲线），鼠标悬停浮出当天各厂商用量明细。
 
@@ -47,8 +52,9 @@ swift test
 前置要求：`xcode-select` 指向 Xcode（CommandLineTools 缺少 SwiftUIMacros 插件，无法编译 SwiftUI），
 并已执行过 `sudo xcodebuild -license accept`。
 
-> 注意：以 .app 启动时不继承 shell 环境变量（如 `DEEPSEEK_API_KEY`、`CODEX_HOME`）。
-> 各厂商认证按「环境变量 → 本机配置文件」顺序发现，依赖环境变量的场景请落盘到对应配置文件。
+> 注意：以 .app 启动时不继承 shell 环境变量（如 `CODEX_HOME`、`DSH_HOME`）。
+> 各厂商认证均从本机配置文件发现；DeepSeek 依赖 DeepSeek Harness 的登录态，
+> 请先在其应用内登录。
 
 > 提示：macOS 可能把第三方菜单栏应用的图标默认收入控制中心隐藏区，
 > 若启动后看不到图标，请在「控制中心 → 菜单栏」中把 QuotaBar 点亮。

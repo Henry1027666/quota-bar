@@ -56,11 +56,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = hosting
         self.popover = popover
 
-        // 主窗口先于 DeepSeek 登录窗口关闭时保持 .regular；登录窗口随后关闭时在这里补一次重估。
-        DeepSeekWebSession.shared.onLoginWindowClosed = { [weak self] in
-            self?.mainWindowController?.updateActivationPolicy()
-        }
-
         // 用户通过右键菜单“退出”时，先标记为显式退出，再发起 terminate。
         NotificationCenter.default.addObserver(
             forName: Notification.Name("QuotaBarUserQuit"), object: nil, queue: .main

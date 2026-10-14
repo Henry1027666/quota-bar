@@ -82,9 +82,6 @@ struct DashboardView: View {
         )
         .fixedSize(horizontal: false, vertical: true)
         .task { await store.refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: .dsWebUsageUpdated)) { _ in
-            Task { await store.refresh(force: true) }
-        }
     }
 
     // MARK: - 顶部总用量（纯展示，图表在主窗口总览页）
@@ -217,15 +214,10 @@ private struct ProviderRowView: View {
                         }
                     }
                     if kind == .deepSeek, snapshot.tokenUsage == nil, snapshot.requestCount == nil {
-                        Button {
-                            DeepSeekWebSession.shared.showLoginWindow()
-                        } label: {
-                            Label("登录 DeepSeek 获取今日用量", systemImage: "person.crop.circle.badge.plus")
-                                .font(.caption)
-                                .foregroundStyle(kind.tint)
-                        }
-                        .buttonStyle(.plain)
-                        .help("在应用内登录 DeepSeek 开放平台，自动统计今日调用次数与消耗")
+                        // 本应用不再提供登录入口：凭据取自 DeepSeek Harness 的本地登录态
+                        Label("在 DeepSeek Harness 中登录后自动统计用量", systemImage: "info.circle")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                     if let message = snapshot.message {
                         Text(message).font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)

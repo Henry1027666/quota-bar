@@ -38,10 +38,9 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// 重估激活策略：主窗口或 DeepSeek 登录窗口任一可见时保持 .regular，都关了退回纯菜单栏。
+    /// 重估激活策略：主窗口可见时保持 .regular，关闭后退回纯菜单栏。
     func updateActivationPolicy() {
-        let mainVisible = window?.isVisible ?? false
-        if !mainVisible, !DeepSeekWebSession.shared.isLoginWindowVisible {
+        if !(window?.isVisible ?? false) {
             NSApp.setActivationPolicy(.accessory)
         }
     }

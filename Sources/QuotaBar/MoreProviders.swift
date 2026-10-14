@@ -231,29 +231,15 @@ struct DeepSeekProvider: QuotaProvider {
     let kind = ProviderKind.deepSeek
 
     func fetch() async throws -> ProviderSnapshot {
-        guard let apiKey = discoverAPIKey() else {
-            throw QuotaError.notAuthenticated("未检测到 DeepSeek API Key")
-        }
-        // 官方 API：余额（始终可用）
-        let payload = try await Support.jsonRequest(
-            URL(string: "https://api.deepseek.com/user/balance")!, bearer: apiKey
-        )
-        let root = payload as? [String: Any] ?? [:]
-        let rows = root["balance_infos"] as? [[String: Any]] ?? []
-        var balances = rows.compactMap { row -> MoneyBalance? in
-            guard let amount = Support.firstNumber(in: row, keys: ["total_balance", "balance"]) else { return nil }
-            return MoneyBalance(
-                label: "API 余额",
-                amount: amount,
-                currency: Support.firstString(in: row, keys: ["currency"]) ?? "CNY"
-            )
+        // 唯一凭据来源：DSH（DeepSeek Harness）的本地登录态。
+        // 用户在 DSH 里登录后即可自动统计，本应用不再要求单独登录。
+        guard let dshToken = DSHDeepSeekAccount.token() else {
+            throw QuotaError.notAuthenticated("未检测到 DeepSeek 登录（请在 DeepSeek Harness 中登录）")
         }
 
-        // 网页用量统计（今日调用次数 / 消耗 / 本月消费）：
-        // 纯 HTTP 拉取——DeepSeek 网页端登录态是 localStorage 的 userToken（JWT），
-        // 由「登录 DeepSeek」内嵌窗口收割写入 ~/.deepseek/web_token，后台以 Bearer 复用。
-        // 不创建任何 WebView，避免后台反复加载 usage 整站导致的 WebKit 渲染内存滚雪球
-        // （曾实测 40MB→800MB 卡死）。
+        var balances: [MoneyBalance] = []
+
+        // 账户与用量统计：全部走 platform.deepseek.com 的 /api/v0 接口。
         var tokenUsage: Int?
         var requestCount: Int?
         var tokenBreakdown: TokenBreakdown?
@@ -263,52 +249,43 @@ struct DeepSeekProvider: QuotaProvider {
         var dailyByModel: [ModelTokenSeries]?
         var hourlyByModel: [ModelTokenSeries]?
         var message: String?
-        if let webToken = discoverWebToken() {
-            Log.append("DS", "发现网页会话 token (前缀 \(webToken.prefix(12))…)，拉取用量接口")
-            // 网页会话 bearer token（~/.deepseek/web_token，由内嵌登录收割 localStorage JWT 写入）
-            do {
-                let web = try await fetchWebUsage(bearer: webToken)
-                applyWeb(web, to: &balances, &tokenUsage, &requestCount)
-                // amount 接口返回近 30 天逐日 bucket + 今日逐小时 bucket：
-                // 卡片展示今日值，并补齐精确周期分解与逐日/逐小时趋势。
-                if !web.dailyTokens.isEmpty {
-                    let stats = Self.periodStats(web.dailyTokens)
-                    tokenUsage = stats.today
-                    tokenBreakdown = stats.breakdown
-                    dailyTokens = stats.daily
-                    // 模型维度：按同一条近 30 天日期轴铺成逐日序列（缺失日期补 0），
-                    // 与 dailyTokens 口径一致，供单厂商曲线图叠加各模型细线。
-                    dailyByModel = Self.dailyModelSeries(
-                        web.dailyTokensByModel, days: stats.daily.map(\.day)
-                    )
-                }
-                if !web.hourlyTokens.isEmpty {
-                    hourlyTokens = web.hourlyTokens
-                    hourlyByModel = Self.hourlyModelSeries(
-                        web.hourlyTokensByModel, hours: web.hourlyTokens.map(\.hour)
-                    )
-                }
-                Log.append("DS", "用量接口成功: balances=\(web.balances.count) tokens=\(String(describing: web.tokenUsage)) req=\(String(describing: web.requestCount))")
-                if web.isEmpty { message = "网页用量接口未返回数据" }
-            } catch let QuotaError.sessionExpired(msg) {
-                Log.append("DS", "用量接口 → 登录过期: \(msg)")
-                message = msg
-            } catch {
-                Log.append("DS", "用量接口 → 失败: \(error.localizedDescription)")
-                message = "用量统计不可用（\(error.localizedDescription)）"
+        do {
+            Log.append("DS", "使用 DSH 账户凭据拉取用量接口")
+            let web = try await fetchWebUsage(dshToken: dshToken)
+            applyWeb(web, to: &balances, &tokenUsage, &requestCount)
+            // amount 接口返回近 30 天逐日 bucket + 今日逐小时 bucket：
+            // 卡片展示今日值，并补齐精确周期分解与逐日/逐小时趋势。
+            if !web.dailyTokens.isEmpty {
+                let stats = Self.periodStats(web.dailyTokens)
+                tokenUsage = stats.today
+                tokenBreakdown = stats.breakdown
+                dailyTokens = stats.daily
+                // 模型维度：按同一条近 30 天日期轴铺成逐日序列（缺失日期补 0），
+                // 与 dailyTokens 口径一致，供单厂商曲线图叠加各模型细线。
+                dailyByModel = Self.dailyModelSeries(
+                    web.dailyTokensByModel, days: stats.daily.map(\.day)
+                )
             }
-        } else {
-            // 无网页会话 token：提示用户在面板点「登录 DeepSeek」。
-            // 绝不在此创建 WebView——后台纯 HTTP，杜绝 WebKit 渲染内存滚雪球。
-            Log.append("DS", "未发现网页会话 token")
-            message = "未开启今日用量：点下方「登录 DeepSeek」"
+            if !web.hourlyTokens.isEmpty {
+                hourlyTokens = web.hourlyTokens
+                hourlyByModel = Self.hourlyModelSeries(
+                    web.hourlyTokensByModel, hours: web.hourlyTokens.map(\.hour)
+                )
+            }
+            Log.append("DS", "用量接口成功: balances=\(web.balances.count) tokens=\(String(describing: web.tokenUsage)) req=\(String(describing: web.requestCount))")
+            if web.isEmpty { message = "网页用量接口未返回数据" }
+        } catch let QuotaError.sessionExpired(msg) {
+            Log.append("DS", "用量接口 → 登录过期: \(msg)")
+            message = msg
+        } catch {
+            Log.append("DS", "用量接口 → 失败: \(error.localizedDescription)")
+            message = "用量统计不可用（\(error.localizedDescription)）"
         }
 
         var snapshot = ProviderSnapshot(
             kind: kind, plan: "API", account: nil, windows: [], balances: balances,
             tokenUsage: tokenUsage, requestCount: requestCount, updatedAt: Date(),
-            message: Support.bool(root["is_available"]) == false ? "余额暂不可用"
-                : (message ?? (balances.isEmpty ? "服务未返回余额" : nil))
+            message: message ?? (balances.isEmpty ? "服务未返回余额" : nil)
         )
         snapshot.tokenBreakdown = tokenBreakdown
         snapshot.dailyTokens = dailyTokens
@@ -393,10 +370,14 @@ struct DeepSeekProvider: QuotaProvider {
         return result.isEmpty ? nil : result
     }
 
-    /// 用 bearer token（~/.deepseek/web_token，由内嵌登录收割 localStorage JWT 写入）拉取三接口。
-    private func fetchWebUsage(bearer: String) async throws -> WebUsage {
+    /// 用 DSH 账户凭据拉取三接口。
+    ///
+    /// 注意：DSH 的 token 不是 JWT，也不能走 `Authorization: Bearer`
+    /// （实测返回 `code 40003 invalid token`），必须用它自己的自定义头 `x-dsh-auth-token`
+    /// （对齐 DSH `@deepseek-ai/dsh-deepseek-account-platform` 的 accountHeaders()）。
+    private func fetchWebUsage(dshToken: String) async throws -> WebUsage {
         try await fetchUsageEndpoints(auth: { request in
-            request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+            request.setValue(dshToken, forHTTPHeaderField: "x-dsh-auth-token")
         })
     }
 
@@ -428,7 +409,7 @@ struct DeepSeekProvider: QuotaProvider {
                 Log.append("DS", "后台GET失败 HTTP \(http.statusCode) body: \(snippet)")
                 // HTTP 层 401/403 同样是登录态失效（WAF/网关可能直接拦截），与 code 40002/40003 同等处理。
                 if http.statusCode == 401 || http.statusCode == 403 {
-                    throw QuotaError.sessionExpired("DeepSeek 网页登录已过期，请在面板内重新登录")
+                    throw QuotaError.sessionExpired("DeepSeek 登录已过期，请在 DeepSeek Harness 中重新登录")
                 }
                 throw QuotaError.http(http.statusCode)
             }
@@ -464,12 +445,17 @@ struct DeepSeekProvider: QuotaProvider {
         return result
     }
 
-    // MARK: - 解析（HTTP 与内嵌会话共用）
+    // MARK: - 解析
 
     /// get_user_summary：赠送余额（非零）/ 累计消费（total_costs CNY）。
-    /// 充值余额与官方 API 余额重复，不重复展示。
+    /// 充值余额（normal_wallets）也在这里取，作为「API 余额」展示——
+    /// 原先该值来自 api.deepseek.com 的 API key 接口，现已统一到 DSH 凭据这一条路径。
     private static func parseSummary(_ json: Any, into result: inout WebUsage) {
         guard let biz = bizData(json) else { return }
+        // 充值余额（normal_wallets，通常为 CNY；USD 常为 0E-16 这种极小值，按非零过滤）
+        if let (balance, currency) = firstNonZeroWallet(biz["normal_wallets"]) {
+            result.balances.append(MoneyBalance(label: "API 余额", amount: balance, currency: currency))
+        }
         if let (bonus, currency) = firstNonZeroWallet(biz["bonus_wallets"]) {
             result.balances.append(MoneyBalance(label: "赠送余额", amount: bonus, currency: currency))
         }
@@ -641,58 +627,9 @@ struct DeepSeekProvider: QuotaProvider {
         let dict = json as? [String: Any] ?? [:]
         if let code = Support.firstNumber(in: dict, keys: ["code"]), Int(code) != 0 {
             if Int(code) == 40002 || Int(code) == 40003 {
-                throw QuotaError.sessionExpired("DeepSeek 网页登录已过期，请在面板内重新登录")
+                throw QuotaError.sessionExpired("DeepSeek 登录已过期，请在 DeepSeek Harness 中重新登录")
             }
             throw QuotaError.invalidResponse("DeepSeek 网页接口错误（code \(Int(code))）")
         }
-    }
-
-    /// 读取内嵌登录收割后落盘的 DeepSeek 网页会话 JWT（由 DeepSeekWebSession 写入 ~/.deepseek/web_token）。
-    private func discoverWebToken() -> String? {
-        if let value = ProcessInfo.processInfo.environment["DEEPSEEK_WEB_TOKEN"].flatMap(Support.string) { return value }
-        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".deepseek/web_token")
-        guard FileManager.default.fileExists(atPath: url.path),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        // 兼容 DeepSeek 网页端 JSON 包装格式：{"value":"<token>","__version":"0"} → 取 value。
-        if let data = trimmed.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let value = obj["value"] as? String, !value.isEmpty {
-            return value
-        }
-        return trimmed
-    }
-
-    private func discoverAPIKey() -> String? {
-        if let value = ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"].flatMap(Support.string) { return value }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dshHome = ProcessInfo.processInfo.environment["DSH_HOME"].flatMap(Support.string)
-            .map(URL.init(fileURLWithPath:)) ?? home.appendingPathComponent(".dsh")
-        let files = [
-            dshHome.appendingPathComponent(".credentials.yaml"),
-            dshHome.appendingPathComponent(".env"),
-            home.appendingPathComponent(".claude/settings.json"),
-            home.appendingPathComponent(".config/opencode/opencode.json"),
-            home.appendingPathComponent(".config/opencode/opencode.jsonc"),
-            home.appendingPathComponent(".kimi/config.toml"),
-            home.appendingPathComponent(".kimi-code/config.toml"),
-            home.appendingPathComponent(".deepseek/config.json")
-        ]
-        for url in files where FileManager.default.fileExists(atPath: url.path) {
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            if let value = match(#"DEEPSEEK_API_KEY\s*[\"'=:\s]+([^\"'\s,}]+)"#, in: text) { return value }
-            if text.localizedCaseInsensitiveContains("api.deepseek.com"),
-               let value = match(#"(?:api_key|apiKey)\s*[\"'=:\s]+([^\"'\s,}]+)"#, in: text) { return value }
-        }
-        return nil
-    }
-
-    private func match(_ pattern: String, in text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let result = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-              result.numberOfRanges > 1,
-              let range = Range(result.range(at: 1), in: text) else { return nil }
-        return Support.string(String(text[range]))
     }
 }
