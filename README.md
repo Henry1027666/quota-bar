@@ -21,9 +21,14 @@
 > 用 `Authorization: Bearer` 会被拒（`code 40003`）。早期版本靠内嵌 WKWebView 登录并收割
 > localStorage JWT，现已整套移除。
 
-> 两个来源**口径不同、刻意不重叠**：平台 `by_api_key` 统计的是平台计费口径（含 cacheRead 缓存前缀），
-> DSH 本地日志统计的是 `非缓存输入 + 输出`。为避免同一批调用被算两次，
-> DSH 侧只计入**非 `deepseek-official`** 的 provider；无法判定 provider 的记录不计入。
+> 两个来源**同为平台计费口径、刻意不重叠**：`未命中输入 + 命中缓存输入 + 输出`
+> （即平台侧的 PROMPT_CACHE_MISS + PROMPT_CACHE_HIT + RESPONSE）。
+> 为避免同一批调用被算两次，DSH 侧只计入**非 `deepseek-official`** 的 provider；
+> 无法判定 provider 的记录不计入。
+>
+> 注意 `cacheReadTokens`（命中缓存的输入）**必须计入**——它与 `inputTokens`（未命中输入）
+> 互不重叠，都是真实消耗的 prompt token，平台同样计费。早期版本只算了后者，
+> 导致 DSH 侧用量少算两三个数量级（实测某日 21 万 vs 实际 1.07 亿）。
 
 > DSH 侧按**每条消息的时间戳**归日（而非会话开始日）：DSH 会话可跨天连续使用，
 > 若按会话开始日归集，跨天会话的全部用量都会算到第一天，导致「今日用量」偏少甚至为 0。

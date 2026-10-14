@@ -20,9 +20,15 @@ import Foundation
 /// 是唯一能精确归日的数据源。解压由随包编译的 zstd 单文件解压器完成（见 CZstd），
 /// 不依赖 Homebrew 或任何外部组件。
 ///
-/// 口径：取 `inputTokens + outputTokens`，**不含 `cacheReadTokens`**。
-/// 后者是命中缓存的前缀，会随每轮重复计入整个上下文（实测同一会话 in+out=45,527
-/// 而 in+out+cacheRead=798,167，相差 17.5 倍）。
+/// 口径：取 `totalTokens`（= `inputTokens + cacheReadTokens + outputTokens`），
+/// 与平台 `by_api_key` 的计费口径对齐。
+///
+/// **不要只取 `inputTokens + outputTokens`**（本项目曾如此实现，导致少算两三个数量级）：
+/// DSH 的 `inputTokens` 是**未命中缓存**的输入部分，`cacheReadTokens` 是**命中缓存**的输入部分，
+/// 两者互不重叠、都是真实消耗的 prompt token，平台侧分别对应 PROMPT_CACHE_MISS_TOKEN /
+/// PROMPT_CACHE_HIT_TOKEN，**都计入计费**。实测每条请求恒满足
+/// `total = inputTokens + cacheReadTokens + outputTokens`，说明三者是不重叠的分项。
+/// 本机实测差距：某会话当日 in+out=197,040，而含 cacheRead 为 101,759,408（约 500 倍）。
 ///
 /// 去重：同一会话目录可能同时存在 `session.jsonl.zstd` / `session.v3.jsonl.zstd` /
 /// `session.v4.jsonl.zstd`，它们是同一会话的不同格式世代、内容互相重叠
@@ -40,7 +46,7 @@ enum DSHSessionLogs {
         let at: Date
         let provider: String
         let model: String
-        /// 非缓存输入 + 输出（不含 cacheRead）。
+        /// 本次请求的总 token（未命中输入 + 命中输入 + 输出），与平台计费口径一致。
         let tokens: Int
     }
 
@@ -219,10 +225,12 @@ enum DSHSessionLogs {
                   provider != officialProvider else { continue }
             let model = (source["model"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? provider
 
-            // 不含 cacheRead：那是缓存前缀，会重复计入整个上下文
+            // 与平台计费口径一致：未命中输入 + 命中输入（cacheRead）+ 输出。
+            // 三者不重叠（实测 totalTokens 恒等于三者之和），漏掉 cacheRead 会少算两三个数量级。
             let input = Support.number(usage["inputTokens"]).map(Int.init) ?? 0
+            let cacheRead = Support.number(usage["cacheReadTokens"]).map(Int.init) ?? 0
             let output = Support.number(usage["outputTokens"]).map(Int.init) ?? 0
-            let tokens = input + output
+            let tokens = input + cacheRead + output
             guard tokens > 0 else { continue }
 
             result.append(UsagePoint(

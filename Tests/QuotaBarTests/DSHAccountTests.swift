@@ -146,20 +146,21 @@ private func writeSessionLog(
     let today = cal.startOfDay(for: Date())
     let yesterday = cal.date(byAdding: .day, value: -1, to: today)!
 
-    // 同一会话跨天：昨天 300，今天 200
+    // 同一会话跨天：昨天 (100+999+200)=1299，今天 (80+999+120)=1199
+    // 口径 = 未命中输入 + 命中缓存输入 + 输出（与平台计费一致）
     try writeSessionLog(root: root, workspace: "wd", session: "s1", messages: [
         (yesterday.addingTimeInterval(3600 * 10), "workbuddy-ai", "deepseek-v4.1-flash", 100, 200, 999),
         (today.addingTimeInterval(3600 * 9), "workbuddy-ai", "deepseek-v4.1-flash", 80, 120, 999)
     ])
 
     let totals = try #require(DSHSessionLogs.tokenTotals(root: root))
-    #expect(totals.today == 200, "今天的部分必须算到今天，而不是会话开始日")
-    #expect(totals.last7 == 500)
+    #expect(totals.today == 1199, "今天的部分必须算到今天，而不是会话开始日")
+    #expect(totals.last7 == 2498)
 
     let daily = DSHSessionLogs.dailyTokens(root: root, days: 3)
     let byDay = Dictionary(uniqueKeysWithValues: daily.map { ($0.day, $0.tokens) })
-    #expect(byDay[today] == 200)
-    #expect(byDay[yesterday] == 300)
+    #expect(byDay[today] == 1199)
+    #expect(byDay[yesterday] == 1299)
 
     try FileManager.default.removeItem(at: root)
 }
@@ -173,20 +174,23 @@ private func writeSessionLog(
         (now, "deepseek-official", "deepseek-flash", 9999, 9999, 0)
     ])
     let totals = try #require(DSHSessionLogs.tokenTotals(root: root))
-    #expect(totals.today == 200, "只应计入非官方 provider 的 100+100")
+    #expect(totals.today == 200, "只应计入非官方 provider 的 (100+0+100)")
     try FileManager.default.removeItem(at: root)
 }
 
-/// cacheRead 是缓存前缀，会重复计入整个上下文；用它当用量会高估十几倍。
-@Test func excludesCacheReadTokens() throws {
+/// cacheRead（命中缓存的输入）**必须计入**：它与 inputTokens（未命中输入）互不重叠，
+/// 都是真实消耗的 prompt token，平台侧对应 PROMPT_CACHE_HIT_TOKEN 且计费。
+/// 本项目曾错误地只算 in+out，导致少算两三个数量级（实测某日 21 万 vs 实际 1.07 亿）。
+@Test func includesCacheReadTokens() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("dshlog-\(UUID().uuidString)")
     let now = Date()
-    // 真实形态：input 36,071 / output 9,456 / cacheRead 752,640
+    // 真实形态：未命中输入 36,071 / 输出 9,456 / 命中缓存 752,640
     try writeSessionLog(root: root, workspace: "wd", session: "s1", messages: [
         (now, "workbuddy-ai", "deepseek-v4.1-flash", 36_071, 9_456, 752_640)
     ])
     let totals = try #require(DSHSessionLogs.tokenTotals(root: root))
-    #expect(totals.today == 45_527, "应为 in+out，而非含 cacheRead 的 798,167")
+    #expect(totals.today == 798_167, "应为 in+cacheRead+out；只算 in+out 会少算 17 倍")
+    #expect(totals.today != 45_527, "不得退回只算 in+out 的旧口径")
     try FileManager.default.removeItem(at: root)
 }
 
@@ -207,7 +211,7 @@ private func writeSessionLog(
                         fileName: "session.jsonl.zstd", messages: msgs)
 
     let totals = try #require(DSHSessionLogs.tokenTotals(root: root))
-    #expect(totals.today == 400, "只应读 v4（超集，两条消息共 400），而不是三代相加")
+    #expect(totals.today == 400, "只应读 v4（超集，两条消息各 200），而不是三代相加")
     try FileManager.default.removeItem(at: root)
 }
 
