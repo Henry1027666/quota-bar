@@ -285,13 +285,19 @@ struct DeepSeekProvider: QuotaProvider {
         // 补充来源：DSH 里走**非官方 provider**（如 wb ai）的调用不经过本机 API key，
         // platform 的 by_api_key 看不到，需从 DSH 本地会话缓存补上。
         // 官方 provider 的用量已由平台接口统计，这里刻意排除以免重复计入。
-        let dshDirectory = DSHSessionLogs.projcacheDirectory()
-        if let dsh = Self.collectDSHUsage(directory: dshDirectory, days: 30, now: Date()) {
+        let dshRoot = DSHSessionLogs.sessionsRoot()
+        if let dsh = Self.collectDSHUsage(root: dshRoot, days: 30, now: Date()) {
             Log.append("DS", "DSH 其它 provider 用量: today=\(dsh.today) tokens, 近30天 \(dsh.daily.count) 天, 模型 \(dsh.byModel?.count ?? 0) 个")
             tokenUsage = (tokenUsage ?? 0) + dsh.today
             tokenBreakdown = Self.mergeBreakdown(tokenBreakdown, dsh.breakdown)
             dailyTokens = Self.mergeDaily(dailyTokens, dsh.daily)
             dailyByModel = Self.mergeModelSeries(dailyByModel, dsh.byModel)
+            // 逐小时序列：平台侧只有今天有数，DSH 侧也补上今天的逐小时
+            if !dsh.hourly.isEmpty, let existing = hourlyTokens {
+                hourlyTokens = Self.mergeHourly(existing, dsh.hourly)
+            } else if hourlyTokens == nil, dsh.today > 0 {
+                hourlyTokens = dsh.hourly
+            }
         }
 
         var snapshot = ProviderSnapshot(
@@ -317,21 +323,33 @@ struct DeepSeekProvider: QuotaProvider {
         let breakdown: TokenBreakdown
         let daily: [DailyTokenUsage]
         let byModel: [ModelTokenSeries]?
+        let hourly: [HourlyTokenUsage]
     }
 
-    /// 读 DSH 本地会话缓存，得到非官方 provider 的近 30 天逐日用量、
-    /// 今日/近7天/近30天合计、以及模型维度。无数据时返回 nil（不影响平台口径）。
-    static func collectDSHUsage(directory: URL, days: Int, now: Date) -> DSHUsage? {
-        guard let breakdown = DSHSessionLogs.tokenTotals(directory: directory, now: now) else { return nil }
-        let daily = DSHSessionLogs.dailyTokens(directory: directory, days: days, now: now)
+    /// 读 DSH 本地会话日志，得到非官方 provider 的近 30 天逐日用量、
+    /// 今日/近7天/近30天合计、今日逐小时、以及模型维度。
+    /// 无数据时返回 nil（不影响平台口径）。
+    static func collectDSHUsage(root: URL, days: Int, now: Date) -> DSHUsage? {
+        guard let breakdown = DSHSessionLogs.tokenTotals(root: root, now: now) else { return nil }
+        let daily = DSHSessionLogs.dailyTokens(root: root, days: days, now: now)
         guard daily.contains(where: { $0.tokens > 0 }) else { return nil }
-        let byModel = DSHSessionLogs.dailyTokensByModel(directory: directory, days: days, now: now)
+        let byModel = DSHSessionLogs.dailyTokensByModel(root: root, days: days, now: now)
+        let hourly = DSHSessionLogs.hourlyTokens(root: root, on: now, now: now)
         return DSHUsage(
             today: breakdown.today,
             breakdown: breakdown,
             daily: daily,
-            byModel: byModel.isEmpty ? nil : byModel
+            byModel: byModel.isEmpty ? nil : byModel,
+            hourly: hourly
         )
+    }
+
+    /// 逐小时序列相加（同小时相加，按时间升序）。
+    static func mergeHourly(_ lhs: [HourlyTokenUsage], _ rhs: [HourlyTokenUsage]) -> [HourlyTokenUsage] {
+        var merged: [Date: Int] = [:]
+        for item in lhs { merged[item.hour] = item.tokens }
+        for item in rhs { merged[item.hour, default: 0] += item.tokens }
+        return merged.keys.sorted().map { HourlyTokenUsage(hour: $0, tokens: merged[$0] ?? 0) }
     }
 
     /// 两个来源的周期分解相加（任一侧缺失时取另一侧）。

@@ -15,7 +15,7 @@
   用户在 DSH 里登录后即可自动统计，本应用不再提供单独的登录入口，也不需要 API Key。
   展示余额（充值 / 赠送 / 累计消费）与逐日 token 用量、按模型拆分。
   token 用量由**两个来源合并**而成：平台接口只统计走本机 API Key 的调用，
-  DSH 里走其它 provider（如 wb ai）的调用由本地会话缓存（`~/.dsh/storages/session_projcache`）补齐。
+  DSH 里走其它 provider（如 wb ai）的调用由本地会话日志（`~/.dsh/sessions/**/*.jsonl.zstd`）补齐。
 
 > DeepSeek 的账户接口用 DSH 的自定义头 `x-dsh-auth-token` 认证——它的凭据不是 JWT，
 > 用 `Authorization: Bearer` 会被拒（`code 40003`）。早期版本靠内嵌 WKWebView 登录并收割
@@ -23,7 +23,12 @@
 
 > 两个来源**口径不同、刻意不重叠**：平台 `by_api_key` 统计的是平台计费口径（含 cacheRead 缓存前缀），
 > DSH 本地日志统计的是 `非缓存输入 + 输出`。为避免同一批调用被算两次，
-> DSH 侧只计入**非 `deepseek-official`** 的 provider；旧格式会话（无 provider 信息）无法判定来源，不计入。
+> DSH 侧只计入**非 `deepseek-official`** 的 provider；无法判定 provider 的记录不计入。
+
+> DSH 侧按**每条消息的时间戳**归日（而非会话开始日）：DSH 会话可跨天连续使用，
+> 若按会话开始日归集，跨天会话的全部用量都会算到第一天，导致「今日用量」偏少甚至为 0。
+> 会话正文是 zstd 压缩，应用内置了 zstd 官方单文件解压器（`Sources/CZstd`，仅解压），
+> 用户无需安装 Homebrew 或任何外部组件；同一会话存在多代日志（v3/v4）时只取最新一版，避免重复计数。
 
 综合趋势曲线展示近 7 天逐日 token 用量（每家一条彩色曲线），鼠标悬停浮出当天各厂商用量明细。
 
