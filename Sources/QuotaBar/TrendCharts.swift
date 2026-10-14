@@ -832,6 +832,9 @@ struct ContributionGrid: View {
 /// 堆叠柱天然规避这个问题——总量由柱高表达（不再单独画一条线），各模型由堆叠分段表达，
 /// 占比一眼可见；具体总量值在悬停气泡里给出。
 ///
+/// 堆叠顺序：按合计**升序**——用量最少的画在柱底，最多的堆到柱顶。
+/// 柱底固定是最小用量那一层，柱顶由最大用量模型决定，跨日期比较时形态更稳定。
+///
 /// series 里 isPrimary 的那条（总量）**不参与绘制**，只用于气泡里的总量显示。
 /// 例外：若该厂商没有模型维度（modelSeries 为空，如尚未解析出模型的历史数据），
 /// 则退回「画总量一根柱」，否则图表会整个空白。
@@ -843,11 +846,13 @@ struct MultiSeriesTrendChart: View {
 
     /// 总量序列（气泡里显示；无模型时退回作为唯一的柱）。
     private var totalSeries: ChartSeries? { series.first { $0.isPrimary } }
-    /// 参与堆叠的模型序列。无模型维度时退回总量那一根柱，避免空白图。
+    /// 参与堆叠的模型序列，按合计升序（少量在柱底）。无模型维度时退回总量那一根柱。
     private var modelSeries: [ChartSeries] {
         let models = series.filter { !$0.isPrimary }
-        if !models.isEmpty { return models }
-        return totalSeries.map { [$0.replacingPrimary(false)] } ?? []
+        if models.isEmpty {
+            return totalSeries.map { [$0.replacingPrimary(false)] } ?? []
+        }
+        return models.sorted { $0.total < $1.total }
     }
 
     var body: some View {
@@ -857,7 +862,7 @@ struct MultiSeriesTrendChart: View {
                     barMarks(for: item)
                 }
                 if let hoverDay {
-                    RuleMark(x: .value("日期", hoverDay))
+                    RuleMark(x: .value("日期", hoverDay, unit: .day))
                         .foregroundStyle(.secondary.opacity(0.4))
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 }
@@ -871,18 +876,23 @@ struct MultiSeriesTrendChart: View {
                 range: modelSeries.map(\.color)
             )
             .chartOverlay { proxy in
-                Rectangle().fill(.clear).contentShape(Rectangle())
-                    .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let location):
-                            hoverX = location.x
-                            if let date: Date = proxy.value(atX: location.x) {
-                                hoverDay = nearestDay(to: date)
+                // plotFrame 是 Anchor<CGRect>，需经 GeometryProxy 解析成实际坐标
+                GeometryReader { overlayGeo in
+                    Rectangle().fill(.clear).contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                // 悬停判定按「柱子所占的横向区间」而非最近数据点：
+                                // 柱有宽度，用最近点会让鼠标移到柱子边缘时仍高亮隔壁那根。
+                                guard let plotFrame = proxy.plotFrame else { return }
+                                let rect = overlayGeo[plotFrame]
+                                hoverX = location.x
+                                hoverDay = day(atX: location.x - rect.origin.x, width: rect.width)
+                            case .ended:
+                                hoverDay = nil
                             }
-                        case .ended:
-                            hoverDay = nil
                         }
-                    }
+                }
             }
             .overlay(alignment: .topLeading) {
                 if let hoverDay {
@@ -895,14 +905,49 @@ struct MultiSeriesTrendChart: View {
         .frame(maxHeight: .infinity)
     }
 
-    /// 纵轴上界：按**各模型当日合计**（即柱高）取最大值，再留 12% 留白避免柱子贴顶被裁切。
-    /// 不直接用总量序列，避免总量与模型之和不一致时轴范围失真。全为 0 时给非零上界防退化。
+    /// 纵轴上界：按**单日各模型合计**（即真实柱高）取最大值，再留 12% 留白避免柱子贴顶。
+    /// 不能取「单个模型的最大值」——堆叠后柱高是同日各模型之和，用单模型最大值会让柱顶被裁切。
     private var yUpperBound: Double {
-        var maxValue = 0
-        for item in modelSeries {
-            for point in item.points { maxValue = max(maxValue, point.tokens) }
+        var maxPerDay = 0
+        for day in allDays {
+            maxPerDay = max(maxPerDay, totalTokens(on: day, in: modelSeries))
         }
-        return maxValue > 0 ? Double(maxValue) * 1.12 : 1
+        return maxPerDay > 0 ? Double(maxPerDay) * 1.12 : 1
+    }
+
+    /// 所有出现过的日期（并集，升序），供纵轴范围与柱区间判定复用。
+    private var allDays: [Date] {
+        var seen: Set<Date> = []
+        var result: [Date] = []
+        for item in modelSeries {
+            for point in item.points where !seen.contains(point.day) {
+                seen.insert(point.day)
+                result.append(point.day)
+            }
+        }
+        return result.sorted()
+    }
+
+    /// 某日期在给定序列集合下的合计。
+    private func totalTokens(on day: Date, in items: [ChartSeries]) -> Int {
+        items.reduce(0) { sum, item in
+            sum + (item.points.first { $0.day == day }?.tokens ?? 0)
+        }
+    }
+
+    /// 由绘图区内的 x 坐标反解所属日期：按柱宽等分区间，落在哪根柱的范围内就选哪根。
+    /// 相比「找最近的数据点」，这样在柱子边缘与相邻柱之间都不会误判。
+    private func day(atX x: CGFloat, width: CGFloat) -> Date? {
+        let days = allDays
+        guard !days.isEmpty, width > 0 else { return nil }
+        let slot = width / CGFloat(days.count)
+        guard slot > 0 else { return nil }
+        let index = Int(floor(x / slot))
+        // 落在绘图区边缘的极小边距：夹到最近一端，避免悬停突然消失
+        guard index >= 0, index < days.count else {
+            return index < 0 ? days.first : days.last
+        }
+        return days[index]
     }
 
     /// 单个模型的堆叠柱段：同一自然日的各模型自动堆叠，柱高即合计。
@@ -918,12 +963,6 @@ struct MultiSeriesTrendChart: View {
             // 悬停时聚焦当天：当天柱子全不透明，其余日期淡化
             .opacity(hoverDay == nil || hoverDay == point.day ? 1 : 0.35)
         }
-    }
-
-    private func nearestDay(to date: Date) -> Date? {
-        series.first?.points.min(by: {
-            abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date))
-        })?.day
     }
 
     /// 悬停气泡：总量置顶（图上不再画，只在这里给具体值），其下为各模型分段。
@@ -976,11 +1015,13 @@ struct MultiSeriesHourlyChart: View {
 
     /// 总量序列（气泡里显示；无模型时退回作为唯一的柱）。
     private var totalSeries: ChartSeries? { series.first { $0.isPrimary } }
-    /// 参与堆叠的模型序列。无模型维度时退回总量那一根柱，避免空白图。
+    /// 参与堆叠的模型序列，按合计升序（少量在柱底，与逐日图一致）。无模型维度时退回总量柱。
     private var modelSeries: [ChartSeries] {
         let models = series.filter { !$0.isPrimary }
-        if !models.isEmpty { return models }
-        return totalSeries.map { [$0.replacingPrimary(false)] } ?? []
+        if models.isEmpty {
+            return totalSeries.map { [$0.replacingPrimary(false)] } ?? []
+        }
+        return models.sorted { $0.total < $1.total }
     }
 
     var body: some View {
@@ -990,7 +1031,7 @@ struct MultiSeriesHourlyChart: View {
                     barMarks(for: item)
                 }
                 if let hoverHour {
-                    RuleMark(x: .value("时间", hoverHour))
+                    RuleMark(x: .value("时间", hoverHour, unit: .hour))
                         .foregroundStyle(.secondary.opacity(0.4))
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 }
@@ -1004,18 +1045,22 @@ struct MultiSeriesHourlyChart: View {
                 range: modelSeries.map(\.color)
             )
             .chartOverlay { proxy in
-                Rectangle().fill(.clear).contentShape(Rectangle())
-                    .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let location):
-                            hoverX = location.x
-                            if let date: Date = proxy.value(atX: location.x) {
-                                hoverHour = nearestHour(to: date)
+                // plotFrame 是 Anchor<CGRect>，需经 GeometryProxy 解析成实际坐标
+                GeometryReader { overlayGeo in
+                    Rectangle().fill(.clear).contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                // 与逐日图一致：按柱子所占横向区间判定，而非最近数据点
+                                guard let plotFrame = proxy.plotFrame else { return }
+                                let rect = overlayGeo[plotFrame]
+                                hoverX = location.x
+                                hoverHour = hour(atX: location.x - rect.origin.x, width: rect.width)
+                            case .ended:
+                                hoverHour = nil
                             }
-                        case .ended:
-                            hoverHour = nil
                         }
-                    }
+                }
             }
             .overlay(alignment: .topLeading) {
                 if let hoverHour {
@@ -1028,13 +1073,45 @@ struct MultiSeriesHourlyChart: View {
         .frame(maxHeight: .infinity)
     }
 
-    /// 纵轴上界：按各模型合计（柱高）取最大值并留 12% 留白（与逐日图口径一致）。
+    /// 纵轴上界：按**单小时各模型合计**（柱高）取最大值并留 12% 留白（与逐日图口径一致）。
     private var yUpperBound: Double {
-        var maxValue = 0
-        for item in modelSeries {
-            for point in item.points { maxValue = max(maxValue, point.tokens) }
+        var maxPerHour = 0
+        for hour in allHours {
+            maxPerHour = max(maxPerHour, totalTokens(on: hour))
         }
-        return maxValue > 0 ? Double(maxValue) * 1.12 : 1
+        return maxPerHour > 0 ? Double(maxPerHour) * 1.12 : 1
+    }
+
+    /// 所有出现过的小时（并集，升序）。
+    private var allHours: [Date] {
+        var seen: Set<Date> = []
+        var result: [Date] = []
+        for item in modelSeries {
+            for point in item.points where !seen.contains(point.day) {
+                seen.insert(point.day)
+                result.append(point.day)
+            }
+        }
+        return result.sorted()
+    }
+
+    private func totalTokens(on hour: Date) -> Int {
+        modelSeries.reduce(0) { sum, item in
+            sum + (item.points.first { $0.day == hour }?.tokens ?? 0)
+        }
+    }
+
+    /// 由绘图区内的 x 坐标反解所属小时：按柱宽等分区间判定。
+    private func hour(atX x: CGFloat, width: CGFloat) -> Date? {
+        let hours = allHours
+        guard !hours.isEmpty, width > 0 else { return nil }
+        let slot = width / CGFloat(hours.count)
+        guard slot > 0 else { return nil }
+        let index = Int(floor(x / slot))
+        guard index >= 0, index < hours.count else {
+            return index < 0 ? hours.first : hours.last
+        }
+        return hours[index]
     }
 
     /// 单个模型的堆叠柱段（按小时分桶）。
@@ -1049,12 +1126,6 @@ struct MultiSeriesHourlyChart: View {
             .foregroundStyle(by: .value("序列", item.name))
             .opacity(hoverHour == nil || hoverHour == point.day ? 1 : 0.35)
         }
-    }
-
-    private func nearestHour(to date: Date) -> Date? {
-        series.first?.points.min(by: {
-            abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date))
-        })?.day
     }
 
     private func tooltip(for hour: Date) -> some View {
