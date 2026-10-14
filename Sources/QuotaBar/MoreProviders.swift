@@ -282,6 +282,18 @@ struct DeepSeekProvider: QuotaProvider {
             message = "用量统计不可用（\(error.localizedDescription)）"
         }
 
+        // 补充来源：DSH 里走**非官方 provider**（如 wb ai）的调用不经过本机 API key，
+        // platform 的 by_api_key 看不到，需从 DSH 本地会话缓存补上。
+        // 官方 provider 的用量已由平台接口统计，这里刻意排除以免重复计入。
+        let dshDirectory = DSHSessionLogs.projcacheDirectory()
+        if let dsh = Self.collectDSHUsage(directory: dshDirectory, days: 30, now: Date()) {
+            Log.append("DS", "DSH 其它 provider 用量: today=\(dsh.today) tokens, 近30天 \(dsh.daily.count) 天, 模型 \(dsh.byModel?.count ?? 0) 个")
+            tokenUsage = (tokenUsage ?? 0) + dsh.today
+            tokenBreakdown = Self.mergeBreakdown(tokenBreakdown, dsh.breakdown)
+            dailyTokens = Self.mergeDaily(dailyTokens, dsh.daily)
+            dailyByModel = Self.mergeModelSeries(dailyByModel, dsh.byModel)
+        }
+
         var snapshot = ProviderSnapshot(
             kind: kind, plan: "API", account: nil, windows: [], balances: balances,
             tokenUsage: tokenUsage, requestCount: requestCount, updatedAt: Date(),
@@ -295,6 +307,75 @@ struct DeepSeekProvider: QuotaProvider {
         // 网页接口最多返回近 30 天，「近一年」口径下只覆盖这段（视图层与图表一致）
         snapshot.last365Tokens = dailyTokens?.reduce(0) { $0 + $1.tokens }
         return snapshot
+    }
+
+    // MARK: - DSH 其它 provider 用量合并
+
+    /// DSH 用量的一次采集结果（按日口径，与平台的日序列同轴）。
+    struct DSHUsage {
+        let today: Int
+        let breakdown: TokenBreakdown
+        let daily: [DailyTokenUsage]
+        let byModel: [ModelTokenSeries]?
+    }
+
+    /// 读 DSH 本地会话缓存，得到非官方 provider 的近 30 天逐日用量、
+    /// 今日/近7天/近30天合计、以及模型维度。无数据时返回 nil（不影响平台口径）。
+    static func collectDSHUsage(directory: URL, days: Int, now: Date) -> DSHUsage? {
+        guard let breakdown = DSHSessionLogs.tokenTotals(directory: directory, now: now) else { return nil }
+        let daily = DSHSessionLogs.dailyTokens(directory: directory, days: days, now: now)
+        guard daily.contains(where: { $0.tokens > 0 }) else { return nil }
+        let byModel = DSHSessionLogs.dailyTokensByModel(directory: directory, days: days, now: now)
+        return DSHUsage(
+            today: breakdown.today,
+            breakdown: breakdown,
+            daily: daily,
+            byModel: byModel.isEmpty ? nil : byModel
+        )
+    }
+
+    /// 两个来源的周期分解相加（任一侧缺失时取另一侧）。
+    static func mergeBreakdown(_ lhs: TokenBreakdown?, _ rhs: TokenBreakdown) -> TokenBreakdown {
+        guard let lhs else { return rhs }
+        return TokenBreakdown(
+            today: lhs.today + rhs.today,
+            last7: lhs.last7 + rhs.last7,
+            last30: lhs.last30 + rhs.last30
+        )
+    }
+
+    /// 逐日序列相加：以两侧日期轴的并集重铺，同一天相加。任一侧缺失时取另一侧。
+    static func mergeDaily(_ lhs: [DailyTokenUsage]?, _ rhs: [DailyTokenUsage]) -> [DailyTokenUsage] {
+        guard let lhs, !lhs.isEmpty else { return rhs }
+        var merged: [Date: Int] = [:]
+        // 先铺较长的轴（平台侧固定 30 天），保证日期顺序与覆盖范围稳定
+        let (long, short) = lhs.count >= rhs.count ? (lhs, rhs) : (rhs, lhs)
+        for item in long { merged[item.day] = item.tokens }
+        for item in short { merged[item.day, default: 0] += item.tokens }
+        return merged.keys.sorted().map { DailyTokenUsage(day: $0, tokens: merged[$0] ?? 0) }
+    }
+
+    /// 模型序列相加：同名模型跨来源合并，按合计降序。任一侧缺失时取另一侧。
+    static func mergeModelSeries(_ lhs: [ModelTokenSeries]?, _ rhs: [ModelTokenSeries]?) -> [ModelTokenSeries]? {
+        switch (lhs, rhs) {
+        case (nil, nil): return nil
+        case (let l?, nil): return l
+        case (nil, let r?): return r
+        case (let l?, let r?):
+            var byName: [String: [Date: Int]] = [:]
+            for series in l + r {
+                for point in series.points {
+                    byName[series.model, default: [:]][point.day, default: 0] += point.tokens
+                }
+            }
+            let merged = byName.compactMap { model, perDay -> ModelTokenSeries? in
+                let points = perDay.keys.sorted().map { DailyTokenUsage(day: $0, tokens: perDay[$0] ?? 0) }
+                let series = ModelTokenSeries(model: model, points: points)
+                return series.total > 0 ? series : nil
+            }
+            .sorted { $0.total > $1.total }
+            return merged.isEmpty ? nil : merged
+        }
     }
 
     private func applyWeb(_ web: WebUsage, to balances: inout [MoneyBalance],

@@ -14,10 +14,16 @@
 * **DeepSeek**：**登录凭据直接取自 DeepSeek Harness（`~/.dsh/.credentials.yaml`）**，
   用户在 DSH 里登录后即可自动统计，本应用不再提供单独的登录入口，也不需要 API Key。
   展示余额（充值 / 赠送 / 累计消费）与逐日 token 用量、按模型拆分。
+  token 用量由**两个来源合并**而成：平台接口只统计走本机 API Key 的调用，
+  DSH 里走其它 provider（如 wb ai）的调用由本地会话缓存（`~/.dsh/storages/session_projcache`）补齐。
 
 > DeepSeek 的账户接口用 DSH 的自定义头 `x-dsh-auth-token` 认证——它的凭据不是 JWT，
 > 用 `Authorization: Bearer` 会被拒（`code 40003`）。早期版本靠内嵌 WKWebView 登录并收割
 > localStorage JWT，现已整套移除。
+
+> 两个来源**口径不同、刻意不重叠**：平台 `by_api_key` 统计的是平台计费口径（含 cacheRead 缓存前缀），
+> DSH 本地日志统计的是 `非缓存输入 + 输出`。为避免同一批调用被算两次，
+> DSH 侧只计入**非 `deepseek-official`** 的 provider；旧格式会话（无 provider 信息）无法判定来源，不计入。
 
 综合趋势曲线展示近 7 天逐日 token 用量（每家一条彩色曲线），鼠标悬停浮出当天各厂商用量明细。
 
