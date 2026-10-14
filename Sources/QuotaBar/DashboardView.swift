@@ -202,25 +202,13 @@ private struct ProviderRowView: View {
                         }
                     }
                     let balances = displayBalances(kind: kind, snapshot: snapshot)
-                    if !balances.isEmpty || snapshot.externalTokensToday != nil {
+                    if !balances.isEmpty {
                         VStack(spacing: 4) {
                             ForEach(balances, id: \.label) { group in
                                 HStack {
                                     Text(group.label).foregroundStyle(.secondary)
                                     Spacer()
                                     Text(group.text)
-                                        .monospacedDigit()
-                                        .fontWeight(.medium)
-                                }
-                                .font(.caption)
-                            }
-                            // 第三方路由（DSH/wb ai）用量：不消耗本厂商余额，标注来源
-                            if let source = snapshot.externalTokenSource,
-                               let tokens = snapshot.externalTokensToday {
-                                HStack {
-                                    Text("今日 · \(source)").foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text(tokens.formatted(.number.notation(.compactName)))
                                         .monospacedDigit()
                                         .fontWeight(.medium)
                                 }

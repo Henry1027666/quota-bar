@@ -12,14 +12,7 @@
 * **Kimi Code**：同时发现 `~/.kimi-code`（VS Code 扩展 / 新版客户端）和 `~/.kimi`（旧版 CLI），
   展示 5 小时 / 周 / 月额度、Extra Usage 余额；token 用量由本地会话日志（`~/.kimi-code/sessions`）逐日精确统计
 * **DeepSeek**：同时发现环境变量、DeepSeek Harness 的 `~/.dsh/.credentials.yaml` 与常见客户端配置；
-  展示 API 余额、累计 / 今日消费。面板内嵌登录开放平台后，token 用量按接口逐日 bucket 精确统计。
-  另统计 **DSH（DeepSeek Harness）里经第三方路由（wb ai）调用的用量**——
-  这部分不经过本机 API key，platform 接口看不到，改由本地会话缓存
-  （`~/.dsh/storages/session_projcache`，未压缩 JSON）补齐，卡片上以「今日用量 · DSH · wb ai」单独一行标注，
-  因为该消耗走 WorkBuddy 侧配额、不扣 DeepSeek 账户余额。
-
-> DeepSeek 的 token 用量来自两个并列来源：本机 API key 直连（platform 接口）+ DSH/wb ai（本地缓存），两者相加。
-> 已排除 `deepseek-official` 来源的 DSH 会话，避免与 platform 口径重复计入。
+  展示 API 余额、累计 / 今日消费。面板内嵌登录开放平台后，token 用量按接口逐日 bucket 精确统计
 
 综合趋势曲线展示近 7 天逐日 token 用量（每家一条彩色曲线），鼠标悬停浮出当天各厂商用量明细。
 
