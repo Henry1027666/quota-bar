@@ -167,3 +167,101 @@ import Testing
 
     try FileManager.default.removeItem(at: root)
 }
+
+/// 本机有 zstd 命令行时才运行（应用侧靠它解压 .jsonl.zst）。
+private func zstdAvailable() -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["zstd", "--version"]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    guard (try? process.run()) != nil else { return false }
+    process.waitUntilExit()
+    return process.terminationStatus == 0
+}
+
+private func zstdCompress(_ url: URL) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["zstd", "-q", "-f", url.path]
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw NSError(domain: "zstd", code: Int(process.terminationStatus))
+    }
+}
+
+/// 旧会话被 Codex 压缩为 .jsonl.zst（约一周前的日志）：须照常统计。
+@Test func codexLocalLogsReadsZstdCompressedLogs() throws {
+    guard zstdAvailable() else { return }
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("codex-zst-\(UUID().uuidString)")
+    let sessions = root.appendingPathComponent("sessions")
+    let cal = Calendar(identifier: .gregorian)
+    let now = Date()
+    let dayStart = cal.startOfDay(for: now)
+    let comps = cal.dateComponents([.year, .month, .day], from: dayStart)
+    let dir = sessions.appendingPathComponent(
+        String(format: "%04d/%02d/%02d", comps.year!, comps.month!, comps.day!))
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let iso = ISO8601DateFormatter().string(from: dayStart.addingTimeInterval(12 * 3600))
+    let line = #"{"timestamp":"\#(iso)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":456}}}}"#
+    let plain = dir.appendingPathComponent("a.jsonl")
+    try line.write(to: plain, atomically: true, encoding: .utf8)
+    try zstdCompress(plain)
+    try FileManager.default.removeItem(at: plain)
+
+    let totals = CodexLocalLogs.tokenTotals(sessionsRoot: sessions, now: now)
+    #expect(totals.today == 456)
+
+    try FileManager.default.removeItem(at: root)
+}
+
+/// 归档目录 archived_sessions（扁平、日期在文件名里）与主目录同basename 去重。
+@Test func codexLocalLogsReadsArchivedSessions() throws {
+    guard zstdAvailable() else { return }
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("codex-archived-\(UUID().uuidString)")
+    let sessions = root.appendingPathComponent("sessions")
+    let archived = root.appendingPathComponent("archived_sessions")
+    try FileManager.default.createDirectory(at: archived, withIntermediateDirectories: true)
+    let cal = Calendar(identifier: .gregorian)
+    let now = Date()
+    let dayStart = cal.startOfDay(for: now)
+
+    func tokenLine(_ tokens: Int, _ iso: String) -> String {
+        #"{"timestamp":"\#(iso)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":\#(tokens)}}}}"#
+    }
+
+    // 3 天前的会话：只存在于归档目录（压缩态），按文件名日期计入近 7 天
+    let past = dayStart.addingTimeInterval(-3 * 86400).addingTimeInterval(12 * 3600)
+    let pastComps = cal.dateComponents([.year, .month, .day], from: past)
+    let archivedName = String(format: "rollout-%04d-%02d-%02dT12-00-00-aaaa.jsonl.zst",
+                              pastComps.year!, pastComps.month!, pastComps.day!)
+    let archivedPlain = archived.appendingPathComponent(String(archivedName.dropLast(4)))
+    try tokenLine(300, ISO8601DateFormatter().string(from: past)).write(
+        to: archivedPlain, atomically: true, encoding: .utf8)
+    try zstdCompress(archivedPlain)
+    try FileManager.default.removeItem(at: archivedPlain)
+
+    // 今天的会话：主目录为压缩态，且与归档目录同 basename（模拟重复归档），只计一次
+    let todayComps = cal.dateComponents([.year, .month, .day], from: dayStart)
+    let dir = sessions.appendingPathComponent(
+        String(format: "%04d/%02d/%02d", todayComps.year!, todayComps.month!, todayComps.day!))
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let dupName = String(format: "rollout-%04d-%02d-%02dT09-00-00-bbbb.jsonl.zst",
+                         todayComps.year!, todayComps.month!, todayComps.day!)
+    for base in [archived.appendingPathComponent(dupName), dir.appendingPathComponent(dupName)] {
+        let plainURL = base.deletingPathExtension() // 去掉 .zst，先写纯文本
+        try tokenLine(100, ISO8601DateFormatter().string(from: dayStart.addingTimeInterval(9 * 3600))).write(
+            to: plainURL, atomically: true, encoding: .utf8)
+        try zstdCompress(plainURL)
+        try FileManager.default.removeItem(at: plainURL)
+    }
+
+    let totals = CodexLocalLogs.tokenTotals(sessionsRoot: sessions, now: now)
+    #expect(totals.today == 100)        // 重复 basename 只计一次
+    #expect(totals.last7 == 400)        // 300（归档）+ 100（今天）
+
+    try FileManager.default.removeItem(at: root)
+}

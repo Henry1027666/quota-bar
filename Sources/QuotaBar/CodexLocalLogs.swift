@@ -7,6 +7,10 @@ import Foundation
 /// 是该轮的精确增量。按事件时间戳归并到本地自然小时，即可得出逐小时 / 逐日 /
 /// 今日 / 近 7 天 / 近 30 天各级口径的用量。
 ///
+/// 旧日志会被 Codex 压缩为 `.jsonl.zst`（约一周前的会话），更早的还会移入
+/// `~/.codex/archived_sessions/`（扁平目录，日期取自文件名）；两者都会扫描，
+/// 压缩文件通过本机 `zstd` 命令行解压（未安装则跳过，不报错）。
+///
 /// 模型维度：`token_count` 自身不带模型名，但每一轮对话前会写入一条 `turn_context`
 /// 记录（`payload.model`）。因此顺序扫描文件、把「最近一次见到的 turn_context.model」
 /// 作为后续 token_count 的归属模型即可。实测 314 个会话文件中 turn_context 无缺失；
@@ -175,22 +179,57 @@ enum CodexLocalLogs {
         }
     }
 
-    /// sessions 目录按 YYYY/MM/DD 组织（本地日期），只需枚举自起始日期起的日期目录。
+    /// sessions 主目录按 YYYY/MM/DD 组织（本地日期），归档目录为扁平结构、日期在文件名里。
+    /// 两处都只挑 rollout 日志（.jsonl 或 Codex 压缩产生的 .jsonl.zst），按文件名去重。
     private static func sessionFiles(sessionsRoot: URL, since startKey: String) -> [URL] {
-        guard let enumerator = FileManager.default.enumerator(
-            at: sessionsRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-        ) else { return [] }
         var files: [URL] = []
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            // 路径形如 .../sessions/2026/09/30/rollout-xxx.jsonl
-            let day = url.deletingLastPathComponent().lastPathComponent
-            let month = url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
-            let year = url.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
-            let key = "\(year)-\(month)-\(day)"
-            guard key.count == 10, key >= startKey else { continue }
-            files.append(url)
+        var seen = Set<String>()
+
+        if let enumerator = FileManager.default.enumerator(
+            at: sessionsRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator
+            where url.pathExtension == "jsonl" || url.lastPathComponent.hasSuffix(".jsonl.zst") {
+                // 路径形如 .../sessions/2026/09/30/rollout-xxx.jsonl[.zst]
+                let day = url.deletingLastPathComponent().lastPathComponent
+                let month = url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+                let year = url.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+                let key = "\(year)-\(month)-\(day)"
+                guard key.count == 10, key >= startKey else { continue }
+                if seen.insert(url.lastPathComponent).inserted { files.append(url) }
+            }
+        }
+
+        // 归档目录：~/.codex/archived_sessions/rollout-YYYY-MM-DDTHH-MM-SS-*.jsonl.zst
+        let archivedRoot = sessionsRoot.deletingLastPathComponent().appendingPathComponent("archived_sessions")
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: archivedRoot.path) {
+            for name in names where name.hasPrefix("rollout-") && name.hasSuffix(".jsonl.zst") {
+                let key = String(name.dropFirst("rollout-".count).prefix(10))
+                guard key.count == 10, key >= startKey else { continue }
+                if seen.insert(name).inserted {
+                    files.append(archivedRoot.appendingPathComponent(name))
+                }
+            }
         }
         return files
+    }
+
+    /// 读取日志文本；`.jsonl.zst` 经本机 zstd 命令行解压（未安装 zstd 时返回 nil，跳过该文件）。
+    private static func logText(_ url: URL) -> String? {
+        guard url.lastPathComponent.hasSuffix(".zst") else {
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["zstd", "-dc", url.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// 单文件的「模型 → 每小时 token 数」，带 mtime+size 缓存。
@@ -210,7 +249,7 @@ enum CodexLocalLogs {
 
         var perHourByModel: [String: [String: Int]] = [:]
         var currentModel = unknownModel
-        if let text = try? String(contentsOf: url, encoding: .utf8) {
+        if let text = logText(url) {
             for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
                 // turn_context：记录本轮的模型名，供后续 token_count 归属
                 if line.contains("\"turn_context\"") {
