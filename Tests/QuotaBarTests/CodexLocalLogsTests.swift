@@ -168,7 +168,7 @@ import Testing
     try FileManager.default.removeItem(at: root)
 }
 
-/// 本机有 zstd 命令行时才运行（应用侧靠它解压 .jsonl.zst）。
+/// 本机有 zstd 命令行时才运行（仅用于生成压缩 fixture；应用侧用内置解压器，不依赖 CLI）。
 private func zstdAvailable() -> Bool {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")

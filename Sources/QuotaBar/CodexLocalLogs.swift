@@ -9,7 +9,7 @@ import Foundation
 ///
 /// 旧日志会被 Codex 压缩为 `.jsonl.zst`（约一周前的会话），更早的还会移入
 /// `~/.codex/archived_sessions/`（扁平目录，日期取自文件名）；两者都会扫描，
-/// 压缩文件通过本机 `zstd` 命令行解压（未安装则跳过，不报错）。
+/// 压缩文件用项目内置的 zstd 解压器解开（随包编译，不依赖系统 zstd 命令）。
 ///
 /// 模型维度：`token_count` 自身不带模型名，但每一轮对话前会写入一条 `turn_context`
 /// 记录（`payload.model`）。因此顺序扫描文件、把「最近一次见到的 turn_context.model」
@@ -214,22 +214,13 @@ enum CodexLocalLogs {
         return files
     }
 
-    /// 读取日志文本；`.jsonl.zst` 经本机 zstd 命令行解压（未安装 zstd 时返回 nil，跳过该文件）。
+    /// 读取日志文本；`.jsonl.zst` 用内置的 zstd 解压器解开（与 DSHLogZstd 同一实现，
+    /// 随包编译、不依赖系统 zstd 命令——从 Finder 启动的 GUI 进程 PATH 里没有 Homebrew）。
     private static func logText(_ url: URL) -> String? {
         guard url.lastPathComponent.hasSuffix(".zst") else {
             return try? String(contentsOf: url, encoding: .utf8)
         }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["zstd", "-dc", url.path]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8)
+        return DSHLogZstd.decompressText(at: url)
     }
 
     /// 单文件的「模型 → 每小时 token 数」，带 mtime+size 缓存。
