@@ -76,7 +76,10 @@ struct MainWindowView: View {
     private func scopeTab(title: String, kind: ProviderKind?) -> some View {
         let selected = scope == kind
         return Button {
-            selection.scope = kind
+            // 包动画切换：统计条数字、图表序列、厂商明细卡的出现/消失都随之过渡
+            withAnimation(.snappy(duration: 0.3)) {
+                selection.scope = kind
+            }
         } label: {
             HStack(spacing: 5) {
                 if let kind {
@@ -180,27 +183,37 @@ private struct OverviewView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if let deltas = tokenDeltas(kinds: scopedKinds, states: store.states) {
-                    StatStrip(deltas: deltas, selection: $chartPeriod)
-                }
+        GeometryReader { geo in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let deltas = tokenDeltas(kinds: scopedKinds, states: store.states) {
+                        StatStrip(deltas: deltas, selection: $chartPeriod)
+                    }
 
-                TrendCard(
-                    kinds: scopedKinds,
-                    snapshot: { store.states[$0]?.snapshot },
-                    reloadToken: store.lastRefreshedAt,
-                    period: $chartPeriod
-                )
+                    TrendCard(
+                        kinds: scopedKinds,
+                        snapshot: { store.states[$0]?.snapshot },
+                        reloadToken: store.lastRefreshedAt,
+                        period: $chartPeriod,
+                        chartHeight: chartHeight(for: geo.size.height)
+                    )
 
-                if let scope {
-                    ProviderDetailCard(kind: scope, state: store.states[scope] ?? .loading)
+                    if let scope {
+                        ProviderDetailCard(kind: scope, state: store.states[scope] ?? .loading)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
                 }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .scrollIndicators(.automatic)
         }
-        .scrollIndicators(.automatic)
+    }
+
+    /// 趋势图高度：占窗口内容高度的主体，随窗口等比伸缩并设上下限
+    /// （预留统计条、卡片标题/内边距与顶栏的高度）。
+    private func chartHeight(for contentHeight: CGFloat) -> CGFloat {
+        min(max(contentHeight * 0.52, 200), 420)
     }
 }
 
@@ -245,7 +258,10 @@ private struct StatCell: View {
 
     var body: some View {
         Button {
-            selection = period
+            // 包动画切换：选中格底色/描边过渡，下方图表交叉淡入淡出
+            withAnimation(.snappy(duration: 0.3)) {
+                selection = period
+            }
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
@@ -255,6 +271,8 @@ private struct StatCell: View {
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.primary)
+                    // 切作用域时数字滚动过渡而不是瞬间跳变
+                    .contentTransition(.numericText())
             }
             .padding(.horizontal, 13)
             .padding(.vertical, 10)
@@ -276,12 +294,13 @@ private struct StatCell: View {
 
 // MARK: - 趋势图卡片
 
-/// 趋势图卡片：标题 + 当前周期徽标 + 固定高度图表区（周期由统计条驱动）。
+/// 趋势图卡片：标题 + 当前周期徽标 + 图表区（高度由窗口尺寸推导，随窗口等比伸缩）。
 private struct TrendCard: View {
     let kinds: [ProviderKind]
     let snapshot: (ProviderKind) -> ProviderSnapshot?
     let reloadToken: Date?
     @Binding var period: TrendPeriod
+    var chartHeight: CGFloat
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -296,13 +315,10 @@ private struct TrendCard: View {
                     .background(Color.primary.opacity(0.05), in: Capsule())
             }
             TrendChartPager(kinds: kinds, snapshot: snapshot,
-                            // 年度点阵图内容矮（7 行格子 + 月份标签），用紧凑高度避免大片留白；
-                            // 柱形图需要纵轴读数空间，保持较高
-                            chartHeight: period == .last365 ? 156 : 236,
+                            chartHeight: chartHeight,
                             period: $period, reloadToken: reloadToken)
         }
         .cardStyle()
-        .animation(.snappy(duration: 0.25), value: period)
     }
 }
 

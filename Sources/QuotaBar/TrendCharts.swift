@@ -284,6 +284,7 @@ struct TrendChartPager: View {
                             chartPlaceholder("该日无逐小时用量数据")
                         } else {
                             MultiSeriesHourlyChart(series: hourlySeries, tint: kinds[0].tint)
+                                .transition(.opacity)
                         }
                     } else if let hourlyTrends {
                         if hourlyTrends.isEmpty {
@@ -292,6 +293,7 @@ struct TrendChartPager: View {
                             // 与单厂商逐小时图同口径：各厂商按品牌色堆叠成柱
                             MultiSeriesHourlyChart(series: overviewHourlyStackedSeries,
                                                    tint: hourlyTrends.first?.kind.tint ?? .accentColor)
+                                .transition(.opacity)
                         }
                     } else {
                         chartPlaceholder("加载中…")
@@ -301,19 +303,23 @@ struct TrendChartPager: View {
                         if dailySeries.isEmpty {
                             chartPlaceholder("该时段无用量数据")
                         } else if period == .last365 {
-                            MultiSeriesContributionGrid(series: dailySeries)
+                            MultiSeriesContributionGrid(series: dailySeries, cellSize: gridCellSize)
+                                .transition(.opacity)
                         } else {
                             MultiSeriesTrendChart(series: dailySeries, tint: kinds[0].tint)
+                                .transition(.opacity)
                         }
                     } else if let dailyTrends {
                         if dailyTrends.isEmpty {
                             chartPlaceholder("该时段无用量数据")
                         } else if period == .last365 {
-                            ContributionGrid(trends: dailyTrends)
+                            ContributionGrid(trends: dailyTrends, cellSize: gridCellSize)
+                                .transition(.opacity)
                         } else {
                             // 与单厂商图同口径：各厂商按品牌色堆叠成柱，柱高为当日总量
                             MultiSeriesTrendChart(series: overviewStackedSeries,
                                                   tint: dailyTrends.first?.kind.tint ?? .accentColor)
+                                .transition(.opacity)
                         }
                     } else {
                         chartPlaceholder("加载中…")
@@ -321,6 +327,8 @@ struct TrendChartPager: View {
                 }
             }
             .frame(height: chartHeight)
+            // 切周期时新旧图表交叉淡入淡出（状态变更由统计条按钮包在 withAnimation 里）
+            .animation(.snappy(duration: 0.3), value: period)
         }
         .task(id: reloadID) {
             // 切周期时先置回加载态，避免旧数据在新口径下闪一帧
@@ -412,6 +420,13 @@ struct TrendChartPager: View {
         period != .last365
     }
 
+    /// 点阵格子边长：按图表区高度推导（7 行格子 + 月份标签占满卡片），
+    /// 随窗口等比伸缩，限 8...18 防止过密或超出。
+    private var gridCellSize: CGFloat {
+        let total = chartHeight - 36   // 月份标签 14 + 行距 4 + 格子间距 6×3 + 余量
+        return min(max((total / 7 - ContributionGrid.defaultCellSpacing), 8), 18)
+    }
+
     /// 图例条目：单厂商作用域用各模型，否则用各厂商；都只列实际有数据的序列。
     /// 单厂商时通常排除总量条目——它已由堆叠柱高表达，图例重复列出反而误导。
     /// 例外：该厂商没有模型维度时（图上画的就是总量那根柱），图例保留它，否则图例会空。
@@ -492,10 +507,13 @@ struct ContributionGrid: View {
     @State private var hoverDay: Date?
     @State private var hoverColumn = 0
 
-    private static let cellSize: CGFloat = 10
-    private static let cellSpacing: CGFloat = 3
-    private static let columnWidth = cellSize + cellSpacing
-    private static let monthLabelHeight: CGFloat = 14
+    static let defaultCellSize: CGFloat = 10
+    static let defaultCellSpacing: CGFloat = 3
+    /// 格子边长：默认 10；由图表区高度传入时可随窗口等比伸缩
+    var cellSize: CGFloat = Self.defaultCellSize
+    private let cellSpacing: CGFloat = Self.defaultCellSpacing
+    private var columnWidth: CGFloat { cellSize + cellSpacing }
+    private let monthLabelHeight: CGFloat = 14
 
     /// 逐日合计（当日 00:00 → tokens）
     private var totals: [Date: Int] {
@@ -543,25 +561,25 @@ struct ContributionGrid: View {
                     // 月份标签行
                     ZStack(alignment: .topLeading) {
                         Color.clear.frame(
-                            width: CGFloat(weeks.count) * Self.columnWidth,
-                            height: Self.monthLabelHeight
+                            width: CGFloat(weeks.count) * columnWidth,
+                            height: monthLabelHeight
                         )
                         ForEach(monthLabels, id: \.column) { label in
                             Text(label.text)
                                 .font(.system(size: 9))
                                 .foregroundStyle(.tertiary)
-                                .offset(x: CGFloat(label.column) * Self.columnWidth)
+                                .offset(x: CGFloat(label.column) * columnWidth)
                         }
                     }
 
-                    HStack(spacing: Self.cellSpacing) {
+                    HStack(spacing: cellSpacing) {
                         ForEach(Array(weeks.enumerated()), id: \.offset) { column, week in
-                            VStack(spacing: Self.cellSpacing) {
+                            VStack(spacing: cellSpacing) {
                                 ForEach(Array(week.enumerated()), id: \.offset) { _, cell in
                                     if let day = cell {
                                         RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                                             .fill(color(for: totals[day] ?? 0, max: maxTokens))
-                                            .frame(width: Self.cellSize, height: Self.cellSize)
+                                            .frame(width: cellSize, height: cellSize)
                                             .onHover { hovering in
                                                 if hovering {
                                                     hoverDay = day
@@ -571,7 +589,7 @@ struct ContributionGrid: View {
                                                 }
                                             }
                                     } else {
-                                        Color.clear.frame(width: Self.cellSize, height: Self.cellSize)
+                                        Color.clear.frame(width: cellSize, height: cellSize)
                                     }
                                 }
                             }
@@ -583,7 +601,7 @@ struct ContributionGrid: View {
                 .overlay(alignment: .topLeading) {
                     if let hoverDay {
                         tooltip(for: hoverDay)
-                            .offset(x: tooltipX, y: Self.monthLabelHeight + 4)
+                            .offset(x: tooltipX, y: monthLabelHeight + 4)
                             .allowsHitTesting(false)
                     }
                 }
@@ -598,8 +616,8 @@ struct ContributionGrid: View {
 
     /// 气泡跟随悬停格子的列：格子中心水平对齐，并在网格内钳制。
     private var tooltipX: CGFloat {
-        let gridWidth = CGFloat(weeks.count) * Self.columnWidth
-        let centerX = CGFloat(hoverColumn) * Self.columnWidth + Self.cellSize / 2 + 2
+        let gridWidth = CGFloat(weeks.count) * columnWidth
+        let centerX = CGFloat(hoverColumn) * columnWidth + cellSize / 2 + 2
         return min(max(centerX - 61, 0), max(gridWidth - 122, 0))
     }
 
@@ -1021,10 +1039,13 @@ struct MultiSeriesContributionGrid: View {
     @State private var hoverDay: Date?
     @State private var hoverColumn = 0
 
-    private static let cellSize: CGFloat = 10
-    private static let cellSpacing: CGFloat = 3
-    private static let columnWidth = cellSize + cellSpacing
-    private static let monthLabelHeight: CGFloat = 14
+    static let defaultCellSize: CGFloat = 10
+    static let defaultCellSpacing: CGFloat = 3
+    /// 格子边长：默认 10；由图表区高度传入时可随窗口等比伸缩
+    var cellSize: CGFloat = Self.defaultCellSize
+    private let cellSpacing: CGFloat = Self.defaultCellSpacing
+    private var columnWidth: CGFloat { cellSize + cellSpacing }
+    private let monthLabelHeight: CGFloat = 14
 
     /// 总用量序列（第 0 条）的逐日值；点阵用它的日期轴与着色。
     private var primary: ChartSeries? { series.first { $0.isPrimary } ?? series.first }
@@ -1071,25 +1092,25 @@ struct MultiSeriesContributionGrid: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ZStack(alignment: .topLeading) {
                         Color.clear.frame(
-                            width: CGFloat(weeks.count) * Self.columnWidth,
-                            height: Self.monthLabelHeight
+                            width: CGFloat(weeks.count) * columnWidth,
+                            height: monthLabelHeight
                         )
                         ForEach(monthLabels, id: \.column) { label in
                             Text(label.text)
                                 .font(.system(size: 9))
                                 .foregroundStyle(.tertiary)
-                                .offset(x: CGFloat(label.column) * Self.columnWidth)
+                                .offset(x: CGFloat(label.column) * columnWidth)
                         }
                     }
 
-                    HStack(spacing: Self.cellSpacing) {
+                    HStack(spacing: cellSpacing) {
                         ForEach(Array(weeks.enumerated()), id: \.offset) { column, week in
-                            VStack(spacing: Self.cellSpacing) {
+                            VStack(spacing: cellSpacing) {
                                 ForEach(Array(week.enumerated()), id: \.offset) { _, cell in
                                     if let day = cell {
                                         RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                                             .fill(color(for: totals[day] ?? 0, max: maxTokens))
-                                            .frame(width: Self.cellSize, height: Self.cellSize)
+                                            .frame(width: cellSize, height: cellSize)
                                             .onHover { hovering in
                                                 if hovering {
                                                     hoverDay = day
@@ -1099,7 +1120,7 @@ struct MultiSeriesContributionGrid: View {
                                                 }
                                             }
                                     } else {
-                                        Color.clear.frame(width: Self.cellSize, height: Self.cellSize)
+                                        Color.clear.frame(width: cellSize, height: cellSize)
                                     }
                                 }
                             }
@@ -1111,7 +1132,7 @@ struct MultiSeriesContributionGrid: View {
                 .overlay(alignment: .topLeading) {
                     if let hoverDay {
                         tooltip(for: hoverDay)
-                            .offset(x: tooltipX, y: Self.monthLabelHeight + 4)
+                            .offset(x: tooltipX, y: monthLabelHeight + 4)
                             .allowsHitTesting(false)
                     }
                 }
@@ -1125,8 +1146,8 @@ struct MultiSeriesContributionGrid: View {
     }
 
     private var tooltipX: CGFloat {
-        let gridWidth = CGFloat(weeks.count) * Self.columnWidth
-        let centerX = CGFloat(hoverColumn) * Self.columnWidth + Self.cellSize / 2 + 2
+        let gridWidth = CGFloat(weeks.count) * columnWidth
+        let centerX = CGFloat(hoverColumn) * columnWidth + cellSize / 2 + 2
         return min(max(centerX - 61, 0), max(gridWidth - 122, 0))
     }
 

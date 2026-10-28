@@ -44,14 +44,15 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
     private func makeWindow() -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false
         )
         window.title = "Quota Bar"
         // 隐藏标题文字：各详情页有自己的大标题头部，标题栏再显示一遍纯属重复
         window.titleVisibility = .hidden
-        window.minSize = NSSize(width: 760, height: 500)
+        // 最小尺寸保证统计条四格、图表纵轴标签与厂商明细卡在窄窗口下不破版
+        window.minSize = NSSize(width: 820, height: 580)
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(
             rootView: MainWindowView(store: store, selection: selection)
