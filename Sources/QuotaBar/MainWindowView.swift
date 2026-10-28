@@ -2,132 +2,13 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// 主窗口侧边栏条目：总览 / 设置。厂商不再是侧边栏页面，而是总览页内的作用域。
-enum SidebarItem: Hashable {
-    case overview
-    case settings
-}
-
-/// 主窗口：自绘固定侧边栏布局（不用 NavigationSplitView——它自动注入的收起按钮
-/// 在 macOS 26 上渲染成乱跑的悬浮胶囊，且这个窗口不需要收起侧边栏）。
+/// 主窗口：顶栏（作用域切换 + 设置齿轮弹窗）+ 总览内容区。
+/// 厂商不是独立页面，而是总览页内的作用域；无侧边栏。
 struct MainWindowView: View {
     @ObservedObject var store: QuotaStore
     @ObservedObject var selection: MainWindowSelection
-
-    var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-                .frame(width: 180)
-                .frame(maxHeight: .infinity)
-                .background(Color(nsColor: .underPageBackgroundColor))
-
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .task { await store.refresh() }
-    }
-
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            SidebarRow(title: "总览", symbol: "chart.line.uptrend.xyaxis", tint: .accentColor,
-                       selected: currentItem == .overview) {
-                selection.item = .overview
-            }
-            SidebarRow(title: "设置", symbol: "gearshape", tint: .accentColor,
-                       selected: currentItem == .settings) {
-                selection.item = .settings
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 8)
-        .padding(.top, 12)
-    }
-
-    private var currentItem: SidebarItem {
-        selection.item ?? .overview
-    }
-
-    @ViewBuilder
-    private var detail: some View {
-        switch currentItem {
-        case .overview:
-            OverviewView(store: store, selection: selection)
-        case .settings:
-            SettingsView(store: store)
-        }
-    }
-}
-
-/// 侧边栏条目：选中态为 accent 圆角底 + 白字，未选中为透明底 + 品牌色图标。
-private struct SidebarRow: View {
-    let title: String
-    let symbol: String
-    let tint: Color
-    var dimmed = false
-    var indented = false
-    let selected: Bool
-    let action: () -> Void
-    @State private var hovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                Image(systemName: symbol)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(selected ? .white : tint)
-                    .frame(width: 16)
-                Text(title)
-                    .font(.system(size: 12, weight: selected ? .medium : .regular))
-                    .foregroundStyle(selected ? .white : (dimmed ? .secondary : .primary))
-                Spacer()
-            }
-            .padding(.leading, indented ? 18 : 8)
-            .padding(.trailing, 8)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(selected ? Color.accentColor : (hovered ? Color.primary.opacity(0.06) : .clear))
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-    }
-}
-
-/// 通用卡片容器：圆角浅底 + 内边距，标题小字置顶。
-private struct DetailCard<Content: View>: View {
-    let title: String?
-    @ViewBuilder let content: Content
-
-    init(_ title: String? = nil, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let title {
-                Text(title)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundStyle(.secondary)
-            }
-            content
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-}
-
-/// 总览页：作用域切换器（总览/各厂商）+ 三栏统计卡 + 趋势图翻页器 + 厂商明细卡。
-/// 页面模板只有一套，切换作用域只是改数据口径：总览为全部厂商合计，厂商为单列数据。
-private struct OverviewView: View {
-    @ObservedObject var store: QuotaStore
-    @ObservedObject var selection: MainWindowSelection
-    /// 图表统计周期：由统计卡片点击驱动，默认近一年（年度点阵图）。
-    @State private var chartPeriod: TrendPeriod = .last365
+    @State private var showSettings = false
+    @State private var gearHovered = false
 
     private var visibleKinds: [ProviderKind] {
         sortedVisibleKinds(states: store.states)
@@ -139,38 +20,25 @@ private struct OverviewView: View {
         return s
     }
 
-    private var scopedKinds: [ProviderKind] {
-        scope.map { [$0] } ?? visibleKinds
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            OverviewView(store: store, selection: selection)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .task { await store.refresh() }
     }
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                scopeSwitcher
-
-                if let deltas = tokenDeltas(kinds: scopedKinds, states: store.states) {
-                    HStack(spacing: 12) {
-                        bigStat(title: "今日用量", value: deltas.today, period: .today)
-                        bigStat(title: "近7天用量", value: deltas.last7, period: .last7)
-                        bigStat(title: "近30天用量", value: deltas.last30, period: .last30)
-                        bigStat(title: "近一年用量", value: deltas.last365, period: .last365)
-                    }
-                }
-
-                DetailCard {
-                    TrendChartPager(kinds: scopedKinds, snapshot: { store.states[$0]?.snapshot },
-                                    chartHeight: 220, period: $chartPeriod,
-                                    reloadToken: store.lastRefreshedAt)
-                }
-
-                if let scope {
-                    providerDetail(kind: scope)
-                }
-            }
-            .padding(20)
-            .padding(.top, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
+    private var header: some View {
+        HStack(spacing: 12) {
+            scopeSwitcher
+            Spacer()
+            settingsButton
         }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(Color(nsColor: .underPageBackgroundColor))
     }
 
     // MARK: - 作用域切换器
@@ -209,6 +77,105 @@ private struct OverviewView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - 设置（齿轮按钮 + 弹窗）
+
+    private var settingsButton: some View {
+        Button { showSettings.toggle() } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(gearHovered ? Color.primary.opacity(0.08) : Color.primary.opacity(0.05))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { gearHovered = $0 }
+        .popover(isPresented: $showSettings, arrowEdge: .top) {
+            SettingsView(store: store)
+                .frame(width: 380)
+        }
+    }
+}
+
+/// 通用卡片容器：圆角浅底 + 内边距，标题小字置顶。
+private struct DetailCard<Content: View>: View {
+    let title: String?
+    @ViewBuilder let content: Content
+
+    init(_ title: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let title {
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+            }
+            content
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+/// 总览页：三栏统计卡 + 趋势图翻页器 + 厂商明细卡（作用域切换器在顶栏）。
+/// 页面模板只有一套，切换作用域只是改数据口径：总览为全部厂商合计，厂商为单列数据。
+private struct OverviewView: View {
+    @ObservedObject var store: QuotaStore
+    @ObservedObject var selection: MainWindowSelection
+    /// 图表统计周期：由统计卡片点击驱动，默认近一年（年度点阵图）。
+    @State private var chartPeriod: TrendPeriod = .last365
+
+    private var visibleKinds: [ProviderKind] {
+        sortedVisibleKinds(states: store.states)
+    }
+
+    /// 生效作用域：选中的厂商已不可见（如变成未检测到）时回退为总览。
+    private var scope: ProviderKind? {
+        guard let s = selection.scope, visibleKinds.contains(s) else { return nil }
+        return s
+    }
+
+    private var scopedKinds: [ProviderKind] {
+        scope.map { [$0] } ?? visibleKinds
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if let deltas = tokenDeltas(kinds: scopedKinds, states: store.states) {
+                    HStack(spacing: 12) {
+                        bigStat(title: "今日用量", value: deltas.today, period: .today)
+                        bigStat(title: "近7天用量", value: deltas.last7, period: .last7)
+                        bigStat(title: "近30天用量", value: deltas.last30, period: .last30)
+                        bigStat(title: "近一年用量", value: deltas.last365, period: .last365)
+                    }
+                }
+
+                DetailCard {
+                    TrendChartPager(kinds: scopedKinds, snapshot: { store.states[$0]?.snapshot },
+                                    chartHeight: 220, period: $chartPeriod,
+                                    reloadToken: store.lastRefreshedAt)
+                }
+
+                if let scope {
+                    providerDetail(kind: scope)
+                }
+            }
+            .padding(20)
+            .padding(.top, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     // MARK: - 厂商明细（作用域为单个厂商时显示）
