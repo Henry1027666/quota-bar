@@ -272,7 +272,9 @@ struct TrendChartPager: View {
                         if hourlyTrends.isEmpty {
                             chartPlaceholder("该日无逐小时用量数据")
                         } else {
-                            HourlyTrendChart(trends: hourlyTrends)
+                            // 与单厂商逐小时图同口径：各厂商按品牌色堆叠成柱
+                            MultiSeriesHourlyChart(series: overviewHourlyStackedSeries,
+                                                   tint: hourlyTrends.first?.kind.tint ?? .accentColor)
                         }
                     } else {
                         chartPlaceholder("加载中…")
@@ -387,11 +389,10 @@ struct TrendChartPager: View {
         return series
     }
 
-    /// 当前周期图表是否为柱形图：单厂商的今日/近7天/近30天是堆叠柱，总览的近7天/近30天
-    /// 也是堆叠柱；近一年是点阵图，总览的今日是多厂商曲线。图例形状跟图表走（柱→方块）。
+    /// 当前周期图表是否为柱形图：今日/近7天/近30天（总览与单厂商）都是堆叠柱，
+    /// 只有近一年是点阵图。图例形状跟图表走（柱→方块）。
     private var chartShowsBars: Bool {
-        isSingleProvider ? period != .last365
-                         : (period == .last7 || period == .last30)
+        period != .last365
     }
 
     /// 图例条目：单厂商作用域用各模型，否则用各厂商；都只列实际有数据的序列。
@@ -428,6 +429,28 @@ struct TrendChartPager: View {
         return series
     }
 
+    /// 总览作用域「今日」的「总量 + 各厂商」逐小时堆叠柱序列（口径与逐日版一致）。
+    private var overviewHourlyStackedSeries: [ChartSeries] {
+        var perHour: [Date: Int] = [:]
+        for trend in hourlyTrends ?? [] {
+            for item in trend.hours { perHour[item.hour, default: 0] += item.tokens }
+        }
+        var series: [ChartSeries] = []
+        let totalPoints = perHour.keys.sorted()
+            .map { DailyTokenUsage(day: $0, tokens: perHour[$0] ?? 0) }
+        if !totalPoints.isEmpty {
+            series.append(ChartSeries(name: "总用量", points: totalPoints,
+                                      color: .accentColor, isPrimary: true))
+        }
+        for trend in hourlyTrends ?? [] {
+            series.append(ChartSeries(
+                name: trend.kind.name,
+                points: trend.hours.map { DailyTokenUsage(day: $0.hour, tokens: $0.tokens) },
+                color: trend.kind.tint, isPrimary: false))
+        }
+        return series
+    }
+
     /// 当前页实际有数据的厂商（图例行用）。
     private var legendKinds: [ProviderKind] {
         switch period {
@@ -441,106 +464,6 @@ struct TrendChartPager: View {
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-/// 逐小时用量曲线：每家厂商一条彩色平滑曲线；悬停显示参考线与该小时各厂商用量气泡。
-struct HourlyTrendChart: View {
-    let trends: [ProviderHourlyTrend]
-    @State private var hoverHour: Date?
-    @State private var hoverX: CGFloat = 0
-
-    var body: some View {
-        GeometryReader { geo in
-            Chart {
-                ForEach(trends) { trend in
-                    ForEach(trend.hours, id: \.hour) { item in
-                        LineMark(
-                            x: .value("时间", item.hour),
-                            y: .value("Tokens", item.tokens)
-                        )
-                        .foregroundStyle(by: .value("厂商", trend.kind.name))
-                        .interpolationMethod(.catmullRom)
-                        .lineStyle(StrokeStyle(lineWidth: 2))
-                        if hoverHour == item.hour {
-                            PointMark(
-                                x: .value("时间", item.hour),
-                                y: .value("Tokens", item.tokens)
-                            )
-                            .foregroundStyle(by: .value("厂商", trend.kind.name))
-                            .symbolSize(24)
-                        }
-                    }
-                }
-                if let hoverHour {
-                    RuleMark(x: .value("时间", hoverHour))
-                        .foregroundStyle(.secondary.opacity(0.4))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                }
-            }
-            .chartLegend(.hidden)
-            .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
-            .chartForegroundStyleScale(
-                domain: trends.map { $0.kind.name },
-                range: trends.map { $0.kind.tint }
-            )
-            .chartOverlay { proxy in
-                Rectangle().fill(.clear).contentShape(Rectangle())
-                    .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let location):
-                            hoverX = location.x
-                            // 坐标轴全部隐藏，绘图区与 overlay 同原点同尺寸，直接用 location.x 反解时间
-                            if let date: Date = proxy.value(atX: location.x) {
-                                hoverHour = nearestHour(to: date)
-                            }
-                        case .ended:
-                            hoverHour = nil
-                        }
-                    }
-            }
-            .overlay(alignment: .topLeading) {
-                if let hoverHour {
-                    tooltip(for: hoverHour)
-                        .offset(x: min(max(hoverX - 60, 0), max(geo.size.width - 122, 0)), y: 0)
-                        .allowsHitTesting(false)
-                }
-            }
-        }
-        .frame(maxHeight: .infinity)
-    }
-
-    private func nearestHour(to date: Date) -> Date? {
-        trends.first?.hours.min(by: {
-            abs($0.hour.timeIntervalSince(date)) < abs($1.hour.timeIntervalSince(date))
-        })?.hour
-    }
-
-    private func tooltip(for hour: Date) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(hour.formatted(.dateTime.month(.wide).day().hour()))
-                .fontWeight(.semibold)
-            ForEach(trends) { trend in
-                HStack(spacing: 4) {
-                    Circle().fill(trend.kind.tint).frame(width: 5, height: 5)
-                    Text(trend.kind.name)
-                    Spacer()
-                    Text((trend.hours.first { $0.hour == hour }?.tokens ?? 0)
-                        .formatted(.number.notation(.compactName)))
-                        .monospacedDigit()
-                }
-            }
-        }
-        .font(.caption2)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .frame(width: 122)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(.secondary.opacity(0.2), lineWidth: 0.5)
-        )
     }
 }
 
