@@ -31,6 +31,8 @@ enum CodexLocalLogs {
     /// path → (mtime, size, 逐模型每小时 token 数)
     private nonisolated(unsafe) static var cache: [String: (mtime: Date, size: UInt64, perHourByModel: [String: [String: Int]])] = [:]
     private static let lock = NSLock()
+    /// 解析结果磁盘缓存：重启后免全量重新解压/解析，只有新增/变化的文件才重新读
+    private static let diskCache = LogParseCache<[String: [String: Int]]>(name: "codex")
 
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -238,6 +240,14 @@ enum CodexLocalLogs {
         }
         lock.unlock()
 
+        // 内存未命中 → 查磁盘缓存（重启后的热路径）
+        if let value = diskCache.value(for: url.path, mtime: mtime, size: size) {
+            lock.lock()
+            cache[url.path] = (mtime, size, value)
+            lock.unlock()
+            return value
+        }
+
         var perHourByModel: [String: [String: Int]] = [:]
         var currentModel = unknownModel
         if let text = logText(url) {
@@ -268,6 +278,7 @@ enum CodexLocalLogs {
         lock.lock()
         cache[url.path] = (mtime, size, perHourByModel)
         lock.unlock()
+        diskCache.insert(perHourByModel, for: url.path, mtime: mtime, size: size)
         return perHourByModel
     }
 }

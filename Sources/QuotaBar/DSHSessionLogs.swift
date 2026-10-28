@@ -43,9 +43,11 @@ enum DSHSessionLogs {
     /// path → (mtime, size, 该文件解析出的 (时间, 模型, token) 点)
     private nonisolated(unsafe) static var fileCache: [String: (mtime: Date, size: UInt64, points: [UsagePoint])] = [:]
     private static let lock = NSLock()
+    /// 解析结果磁盘缓存：重启后免全量重新解压/解析，只有新增/变化的文件才重新读
+    private static let diskCache = LogParseCache<[UsagePoint]>(name: "dsh")
 
     /// 一条消息级用量（含精确时间戳，用于按日归集）。
-    struct UsagePoint: Equatable, Sendable {
+    struct UsagePoint: Equatable, Sendable, Codable {
         let at: Date
         let provider: String
         let model: String
@@ -224,10 +226,19 @@ enum DSHSessionLogs {
         lock.unlock()
         if let cached, cached.mtime == mtime, cached.size == size { return cached.points }
 
+        // 内存未命中 → 查磁盘缓存（重启后的热路径）
+        if let value = diskCache.value(for: url.path, mtime: mtime, size: size) {
+            lock.lock()
+            fileCache[url.path] = (mtime, size, value)
+            lock.unlock()
+            return value
+        }
+
         let parsed = parse(url)
         lock.lock()
         fileCache[url.path] = (mtime, size, parsed)
         lock.unlock()
+        diskCache.insert(parsed, for: url.path, mtime: mtime, size: size)
         return parsed
     }
 

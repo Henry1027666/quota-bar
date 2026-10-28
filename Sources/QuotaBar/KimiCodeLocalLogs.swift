@@ -28,6 +28,8 @@ enum KimiCodeLocalLogs {
     /// path → (mtime, size, 逐模型每小时 token 数)
     private nonisolated(unsafe) static var cache: [String: (mtime: Date, size: UInt64, perHourByModel: [String: [String: Int]])] = [:]
     private static let lock = NSLock()
+    /// 解析结果磁盘缓存：重启后免全量重新解析，只有新增/变化的文件才重新读
+    private static let diskCache = LogParseCache<[String: [String: Int]]>(name: "kimi")
 
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -203,6 +205,14 @@ enum KimiCodeLocalLogs {
         }
         lock.unlock()
 
+        // 内存未命中 → 查磁盘缓存（重启后的热路径）
+        if let value = diskCache.value(for: url.path, mtime: mtime, size: size) {
+            lock.lock()
+            cache[url.path] = (mtime, size, value)
+            lock.unlock()
+            return value
+        }
+
         var perHourByModel: [String: [String: Int]] = [:]
         if let text = try? String(contentsOf: url, encoding: .utf8) {
             for line in text.split(separator: "\n", omittingEmptySubsequences: true)
@@ -223,6 +233,7 @@ enum KimiCodeLocalLogs {
         lock.lock()
         cache[url.path] = (mtime, size, perHourByModel)
         lock.unlock()
+        diskCache.insert(perHourByModel, for: url.path, mtime: mtime, size: size)
         return perHourByModel
     }
 }

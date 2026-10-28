@@ -171,6 +171,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// macOS 26 在移除/隐藏菜单栏项时会调用 terminate:（无任何退出意图），
     /// 若直接放行，应用会在启动后不久被系统静默回收。这里对“非用户主动退出”一律取消。
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // 退出前把日志解析磁盘缓存落盘（不写只影响下次启动速度，不影响正确性）。
+        LogParseCacheRegistry.flushAll()
         if userRequestedQuit { return .terminateNow }
         // 登出/重启/关机/osascript quit 等退出 Apple Event 应正常放行。
         if let event = NSAppleEventManager.shared().currentAppleEvent,
