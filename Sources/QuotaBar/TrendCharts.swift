@@ -183,8 +183,8 @@ struct QuotaRow: View {
     let tint: Color
 
     var body: some View {
-        VStack(spacing: 4) {
-            HStack {
+        VStack(spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
                 Text(window.title)
                 Spacer()
                 Text("已用 \(window.fraction.formatted(.percent.precision(.fractionLength(0))))")
@@ -197,9 +197,7 @@ struct QuotaRow: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            ProgressView(value: window.fraction)
-                .progressViewStyle(.linear)
-                .tint(progressTint)
+            CapsuleTrack(fraction: window.fraction, tint: progressTint)
         }
     }
 
@@ -207,6 +205,25 @@ struct QuotaRow: View {
         if window.fraction >= 0.9 { return .red }
         if window.fraction >= 0.7 { return .orange }
         return tint
+    }
+}
+
+/// 胶囊进度条：浅色轨道 + 品牌色填充，比系统 ProgressView 更饱满。
+private struct CapsuleTrack: View {
+    let fraction: Double
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.08))
+                Capsule()
+                    .fill(tint)
+                    .frame(width: fraction > 0 ? max(6, geo.size.width * fraction) : 0)
+            }
+        }
+        .frame(height: 6)
+        .animation(.easeOut(duration: 0.25), value: fraction)
     }
 }
 
