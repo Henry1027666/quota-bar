@@ -261,14 +261,13 @@ struct TrendChartPager: View {
             }
             .onChange(of: period) { _, _ in pageOffset = 0 }
 
-            // 自定义图例：彩色圆点 + 名称（图表内自动图例已隐藏）
+            // 图例形状跟图表走：堆叠柱用方块（与堆叠段一致），曲线/点阵用圆点。
+            // 总量不进图例，它在悬停气泡里给出。
             if !legendEntries.isEmpty {
                 HStack(spacing: 12) {
                     ForEach(legendEntries) { entry in
                         HStack(spacing: 4) {
-                            // 单厂商堆叠柱图里图例只列各模型（方块，与堆叠段一致）；
-                            // 总览仍是各厂商曲线（圆点）。总量不进图例，它在悬停气泡里给出。
-                            if isSingleProvider {
+                            if chartShowsBars {
                                 RoundedRectangle(cornerRadius: 1.5, style: .continuous)
                                     .fill(entry.color)
                                     .frame(width: 7, height: 7)
@@ -319,7 +318,9 @@ struct TrendChartPager: View {
                         } else if period == .last365 {
                             ContributionGrid(trends: dailyTrends)
                         } else {
-                            CombinedTrendChart(trends: dailyTrends)
+                            // 与单厂商图同口径：各厂商按品牌色堆叠成柱，柱高为当日总量
+                            MultiSeriesTrendChart(series: overviewStackedSeries,
+                                                  tint: dailyTrends.first?.kind.tint ?? .accentColor)
                         }
                     } else {
                         chartPlaceholder("加载中…")
@@ -433,6 +434,13 @@ struct TrendChartPager: View {
         }
     }
 
+    /// 当前页图表是否为柱形图：单厂商的今日/近7天/近30天是堆叠柱，总览的近7天/近30天
+    /// 也是堆叠柱；近一年是点阵图，总览的今日是多厂商曲线。图例形状跟图表走（柱→方块）。
+    private var chartShowsBars: Bool {
+        isSingleProvider ? period != .last365
+                         : (period == .last7 || period == .last30)
+    }
+
     /// 图例条目：单厂商作用域用各模型，否则用各厂商；都只列实际有数据的序列。
     /// 单厂商时通常排除总量条目——它已由堆叠柱高表达，图例重复列出反而误导。
     /// 例外：该厂商没有模型维度时（图上画的就是总量那根柱），图例保留它，否则图例会空。
@@ -444,6 +452,27 @@ struct TrendChartPager: View {
         }
         let kinds = self.legendKinds
         return kinds.map { ChartSeries(name: $0.name, points: [], color: $0.tint, isPrimary: true) }
+    }
+
+    /// 总览作用域的「总量 + 各厂商」堆叠柱序列：第 0 条为每日合计（不参与绘制，
+    /// 只进悬停气泡），其后为各厂商分段（品牌色）。口径与单厂商图的「总量 + 各模型」一致。
+    private var overviewStackedSeries: [ChartSeries] {
+        var perDay: [Date: Int] = [:]
+        for trend in dailyTrends ?? [] {
+            for item in trend.days { perDay[item.day, default: 0] += item.tokens }
+        }
+        var series: [ChartSeries] = []
+        let totalPoints = perDay.keys.sorted()
+            .map { DailyTokenUsage(day: $0, tokens: perDay[$0] ?? 0) }
+        if !totalPoints.isEmpty {
+            series.append(ChartSeries(name: "总用量", points: totalPoints,
+                                      color: .accentColor, isPrimary: true))
+        }
+        for trend in dailyTrends ?? [] {
+            series.append(ChartSeries(name: trend.kind.name, points: trend.days,
+                                      color: trend.kind.tint, isPrimary: false))
+        }
+        return series
     }
 
     /// 当前页实际有数据的厂商（图例行用）。
@@ -459,111 +488,6 @@ struct TrendChartPager: View {
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-/// 近 7 天综合用量曲线：每家厂商一条彩色平滑曲线，无坐标轴，右端为今天。
-/// 鼠标悬停时显示垂直参考线，并浮出气泡列出当天各厂商用量。
-struct CombinedTrendChart: View {
-    let trends: [ProviderTrend]
-    @State private var hoverDay: Date?
-    @State private var hoverX: CGFloat = 0
-
-    var body: some View {
-        GeometryReader { geo in
-            Chart {
-                ForEach(trends) { trend in
-                    ForEach(trend.days, id: \.day) { item in
-                        LineMark(
-                            x: .value("日期", item.day),
-                            y: .value("Tokens", item.tokens)
-                        )
-                        // 用 foregroundStyle(by:) 按厂商分系列（颜色由 chartForegroundStyleScale 指定）：
-                        // 不分系列时所有 LineMark 会被连成一条折线，跨厂商首尾相接成对角线锯齿
-                        .foregroundStyle(by: .value("厂商", trend.kind.name))
-                        .interpolationMethod(.catmullRom)
-                        .lineStyle(StrokeStyle(lineWidth: 2))
-                        if hoverDay == item.day {
-                            PointMark(
-                                x: .value("日期", item.day),
-                                y: .value("Tokens", item.tokens)
-                            )
-                            .foregroundStyle(by: .value("厂商", trend.kind.name))
-                            .symbolSize(24)
-                        }
-                    }
-                }
-                if let hoverDay {
-                    RuleMark(x: .value("日期", hoverDay))
-                        .foregroundStyle(.secondary.opacity(0.4))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                }
-            }
-            // 图例由 TrendChartPager 头部的彩色圆点行替代，自动图例孤立在图下方很突兀
-            .chartLegend(.hidden)
-            .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
-            .chartForegroundStyleScale(
-                domain: trends.map { $0.kind.name },
-                range: trends.map { $0.kind.tint }
-            )
-            .chartOverlay { proxy in
-                Rectangle().fill(.clear).contentShape(Rectangle())
-                    .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let location):
-                            hoverX = location.x
-                            // 坐标轴全部隐藏，绘图区与 overlay 同原点同尺寸，直接用 location.x 反解日期
-                            if let date: Date = proxy.value(atX: location.x) {
-                                hoverDay = nearestDay(to: date)
-                            }
-                        case .ended:
-                            hoverDay = nil
-                        }
-                    }
-            }
-            .overlay(alignment: .topLeading) {
-                if let hoverDay {
-                    tooltip(for: hoverDay)
-                        .offset(x: min(max(hoverX - 60, 0), max(geo.size.width - 122, 0)), y: 0)
-                        .allowsHitTesting(false)
-                }
-            }
-        }
-        .frame(maxHeight: .infinity)
-    }
-
-    /// 各厂商序列共享同一组自然日，用第一条序列找离鼠标最近的一天。
-    private func nearestDay(to date: Date) -> Date? {
-        trends.first?.days.min(by: {
-            abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date))
-        })?.day
-    }
-
-    private func tooltip(for day: Date) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(day.formatted(.dateTime.month(.wide).day().weekday(.abbreviated)))
-                .fontWeight(.semibold)
-            ForEach(trends) { trend in
-                HStack(spacing: 4) {
-                    Circle().fill(trend.kind.tint).frame(width: 5, height: 5)
-                    Text(trend.kind.name)
-                    Spacer()
-                    Text((trend.days.first { $0.day == day }?.tokens ?? 0)
-                        .formatted(.number.notation(.compactName)))
-                        .monospacedDigit()
-                }
-            }
-        }
-        .font(.caption2)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .frame(width: 122)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(.secondary.opacity(0.2), lineWidth: 0.5)
-        )
     }
 }
 
