@@ -283,11 +283,12 @@ struct DeepSeekProvider: QuotaProvider {
         }
 
         // 补充来源：DSH 里走**非官方 provider**（如 wb ai）的调用不经过本机 API key，
-        // platform 的 by_api_key 看不到，需从 DSH 本地会话缓存补上。
+        // platform 的 by_api_key 看不到，需从 DSH 本地会话缓存补上；
+        // 本地日志有全历史，这里直接回溯一年，把网页接口只覆盖近 30 天的缺口补齐。
         // 官方 provider 的用量已由平台接口统计，这里刻意排除以免重复计入。
         let dshRoot = DSHSessionLogs.sessionsRoot()
-        if let dsh = Self.collectDSHUsage(root: dshRoot, days: 30, now: Date()) {
-            Log.append("DS", "DSH 其它 provider 用量: today=\(dsh.today) tokens, 近30天 \(dsh.daily.count) 天, 模型 \(dsh.byModel?.count ?? 0) 个")
+        if let dsh = Self.collectDSHUsage(root: dshRoot, days: 365, now: Date()) {
+            Log.append("DS", "DSH 其它 provider 用量: today=\(dsh.today) tokens, 回溯 \(dsh.daily.count) 天, 模型 \(dsh.byModel?.count ?? 0) 个")
             tokenUsage = (tokenUsage ?? 0) + dsh.today
             tokenBreakdown = Self.mergeBreakdown(tokenBreakdown, dsh.breakdown)
             dailyTokens = Self.mergeDaily(dailyTokens, dsh.daily)
@@ -310,7 +311,8 @@ struct DeepSeekProvider: QuotaProvider {
         snapshot.hourlyTokens = hourlyTokens
         snapshot.dailyTokensByModel = dailyByModel
         snapshot.hourlyTokensByModel = hourlyByModel
-        // 网页接口最多返回近 30 天，「近一年」口径下只覆盖这段（视图层与图表一致）
+        // 网页接口只返回近 30 天；DSH 本地日志已回溯一年，这里是「官方 key 近 30 天
+        // + 非官方 provider 近一年」的并集口径（视图层与图表一致）
         snapshot.last365Tokens = dailyTokens?.reduce(0) { $0 + $1.tokens }
         return snapshot
     }
@@ -326,14 +328,20 @@ struct DeepSeekProvider: QuotaProvider {
         let hourly: [HourlyTokenUsage]
     }
 
-    /// 读 DSH 本地会话日志，得到非官方 provider 的近 30 天逐日用量、
-    /// 今日/近7天/近30天合计、今日逐小时、以及模型维度。
+    /// 读 DSH 本地会话日志：非官方 provider 全时段计入；官方 provider 只计入
+    /// 平台 30 天覆盖之外的历史（`includeOfficialBefore` = 今天-29 天起点），
+    /// 窗口内仍由平台接口统计，避免重复。得到近 days 天逐日用量、
+    /// 今日/近7天/近30天合计（不含官方，与平台互补不重叠）、今日逐小时、以及模型维度。
     /// 无数据时返回 nil（不影响平台口径）。
     static func collectDSHUsage(root: URL, days: Int, now: Date) -> DSHUsage? {
         guard let breakdown = DSHSessionLogs.tokenTotals(root: root, now: now) else { return nil }
-        let daily = DSHSessionLogs.dailyTokens(root: root, days: days, now: now)
+        let cal = Calendar(identifier: .gregorian)
+        let officialCutoff = cal.date(byAdding: .day, value: -29, to: cal.startOfDay(for: now))
+        let daily = DSHSessionLogs.dailyTokens(
+            root: root, days: days, includeOfficialBefore: officialCutoff, now: now)
         guard daily.contains(where: { $0.tokens > 0 }) else { return nil }
-        let byModel = DSHSessionLogs.dailyTokensByModel(root: root, days: days, now: now)
+        let byModel = DSHSessionLogs.dailyTokensByModel(
+            root: root, days: days, includeOfficialBefore: officialCutoff, now: now)
         let hourly = DSHSessionLogs.hourlyTokens(root: root, on: now, now: now)
         return DSHUsage(
             today: breakdown.today,

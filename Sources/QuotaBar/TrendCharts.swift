@@ -122,8 +122,8 @@ func sortedVisibleKinds(states: [ProviderKind: ProviderState]) -> [ProviderKind]
 /// 各厂商 Token 计数器在今日 / 近 7 天 / 近 30 天 / 近一年（滚动窗口，含今天）内的用量之和；
 /// 无任何厂商返回 token 用量时为 nil。有精确分解（本地日志 / 逐日接口）的厂商用精确值，
 /// 其余用采样增量估算。弹层顶部三栏与主窗口总览大数字卡片共用。
-/// 近一年经 UsageTrendData 全历史逐日序列求和（本地日志厂商为精确值；DeepSeek 仅近 30 天有数，
-/// 采样兜底仅保留 45 天，更早窗口计 0）。
+/// 近一年经 UsageTrendData 全历史逐日序列求和（本地日志厂商为精确值；
+/// DeepSeek 为「官方 key 近 30 天 + 非官方 provider 本地日志一年」并集）。
 @MainActor
 func tokenDeltas(kinds: [ProviderKind], states: [ProviderKind: ProviderState]) -> (today: Int, last7: Int, last30: Int, last365: Int)? {
     let now = Date()

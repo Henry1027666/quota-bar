@@ -8,8 +8,10 @@ import Foundation
 /// 平台接口完全看不到，于是这部分用量被漏掉了。本文件把这些「其它 provider」补上。
 ///
 /// 与平台口径的分工（重要，避免重复计算）：
-/// - `deepseek-official` → 已由平台 `by_api_key` 统计，**此处必须排除**；
-/// - 其它 provider（如 `workbuddy-ai`）→ 平台看不到，由这里统计；
+/// - `deepseek-official` 近 30 天 → 已由平台 `by_api_key` 统计，**此处必须排除**；
+/// - `deepseek-official` 更早的历史 → 平台只回溯 30 天查不到，由本地日志补齐
+///   （`dailyTokens` / `dailyTokensByModel` 传 `includeOfficialBefore:` 启用）；
+/// - 其它 provider（如 `workbuddy-ai`）→ 平台完全看不到，始终由这里统计；
 /// - 无法判定 provider 的记录 → 宁可不计也不错计。
 ///
 /// 为什么必须解析压缩正文（而不是 `storages/session_projcache` 的未压缩 JSON）：
@@ -34,7 +36,8 @@ import Foundation
 /// `session.v4.jsonl.zstd`，它们是同一会话的不同格式世代、内容互相重叠
 /// （实测 v4 是 v3 的超集）。**每个目录只取版本号最高的一个**，否则会重复计数。
 enum DSHSessionLogs {
-    /// 官方 provider：其用量已由平台接口统计，本地不再重复计入。
+    /// 官方 provider：近 30 天的用量已由平台接口统计，窗口内本地不再重复计入；
+    /// 但平台只回溯近 30 天，更早的历史只能由本地日志补上（见 `includeOfficialBefore`）。
     static let officialProvider = "deepseek-official"
 
     /// path → (mtime, size, 该文件解析出的 (时间, 模型, token) 点)
@@ -58,14 +61,32 @@ enum DSHSessionLogs {
         return base.appendingPathComponent("sessions")
     }
 
+    /// 官方 provider 的点是否计入本次聚合：
+    /// - 不传 cutoff（今日/近7/近30、逐小时）：一律排除——这些窗口平台接口都能覆盖；
+    /// - 传 cutoff（历史回溯）：cutoff 之前的官方点计入（平台只回溯近 30 天，更早的
+    ///   官方用量平台已查不到，必须由本地日志补上），cutoff 当天及之后仍排除以免重复。
+    private static func makeInclude(officialCutoff: Date?, cal: Calendar) -> (UsagePoint) -> Bool {
+        guard let officialCutoff else {
+            return { $0.provider != officialProvider }
+        }
+        return { point in
+            point.provider != officialProvider
+                || cal.startOfDay(for: point.at) < officialCutoff
+        }
+    }
+
     /// 最近 days 天（含今天）逐日 token 用量；无数据返回全 0 序列。
-    static func dailyTokens(root: URL, days: Int, now: Date = Date()) -> [DailyTokenUsage] {
+    /// `includeOfficialBefore:` 传入平台窗口起点（通常今天-29 天）时，早于该日期的
+    /// 官方 provider 用量也会计入（用于把历史回溯补到平台 30 天覆盖之外）。
+    static func dailyTokens(root: URL, days: Int, includeOfficialBefore officialCutoff: Date? = nil,
+                            now: Date = Date()) -> [DailyTokenUsage] {
         let cal = Calendar(identifier: .gregorian)
         let dayStart = cal.startOfDay(for: now)
         guard let firstDay = cal.date(byAdding: .day, value: -(days - 1), to: dayStart) else { return [] }
+        let include = makeInclude(officialCutoff: officialCutoff, cal: cal)
 
         var perDay: [Date: Int] = [:]
-        for point in allPoints(root: root, since: firstDay) {
+        for point in allPoints(root: root, since: firstDay) where include(point) {
             let day = cal.startOfDay(for: point.at)
             guard day >= firstDay, day <= dayStart else { continue }
             perDay[day, default: 0] += point.tokens
@@ -77,13 +98,16 @@ enum DSHSessionLogs {
     }
 
     /// 最近 days 天逐日用量，按模型拆分（只含有数据的模型，按合计降序）。
-    static func dailyTokensByModel(root: URL, days: Int, now: Date = Date()) -> [ModelTokenSeries] {
+    /// `includeOfficialBefore:` 语义与 `dailyTokens` 相同。
+    static func dailyTokensByModel(root: URL, days: Int, includeOfficialBefore officialCutoff: Date? = nil,
+                                   now: Date = Date()) -> [ModelTokenSeries] {
         let cal = Calendar(identifier: .gregorian)
         let dayStart = cal.startOfDay(for: now)
         guard let firstDay = cal.date(byAdding: .day, value: -(days - 1), to: dayStart) else { return [] }
+        let include = makeInclude(officialCutoff: officialCutoff, cal: cal)
 
         var perModelPerDay: [String: [Date: Int]] = [:]
-        for point in allPoints(root: root, since: firstDay) {
+        for point in allPoints(root: root, since: firstDay) where include(point) {
             let day = cal.startOfDay(for: point.at)
             guard day >= firstDay, day <= dayStart else { continue }
             perModelPerDay[point.model, default: [:]][day, default: 0] += point.tokens
@@ -107,7 +131,8 @@ enum DSHSessionLogs {
         let lastHour = isToday ? cal.component(.hour, from: now) : 23
 
         var perHour: [Int: Int] = [:]
-        for point in allPoints(root: root, since: dayStart) where cal.startOfDay(for: point.at) == dayStart {
+        for point in allPoints(root: root, since: dayStart)
+        where cal.startOfDay(for: point.at) == dayStart && point.provider != officialProvider {
             let hour = cal.component(.hour, from: point.at)
             perHour[hour, default: 0] += point.tokens
         }
@@ -128,7 +153,7 @@ enum DSHSessionLogs {
         guard !points.isEmpty else { return nil }
 
         var today = 0, last7 = 0, last30 = 0
-        for point in points {
+        for point in points where point.provider != officialProvider {
             let day = cal.startOfDay(for: point.at)
             guard day <= dayStart else { continue }
             if day >= last30Start { last30 += point.tokens }
@@ -219,10 +244,11 @@ enum DSHSessionLogs {
                   let usage = payload["usage"] as? [String: Any],
                   let ms = Support.number(event["time"]) else { continue }
 
-            // provider/model 在 data.message.source；据此排除官方 provider（平台已在统计）
+            // provider/model 在 data.message.source。官方 provider 的点**不在这里丢弃**：
+            // 近 30 天的窗口内用量由平台接口统计（调用方排除），更早的历史则由本地补齐
+            // （调用方按 includeOfficialBefore 计入），两种口径在聚合时分流。
             let source = ((payload["message"] as? [String: Any])?["source"] as? [String: Any]) ?? [:]
-            guard let provider = source["provider"] as? String, !provider.isEmpty,
-                  provider != officialProvider else { continue }
+            guard let provider = source["provider"] as? String, !provider.isEmpty else { continue }
             let model = (source["model"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? provider
 
             // 与平台计费口径一致：未命中输入 + 命中输入（cacheRead）+ 输出。

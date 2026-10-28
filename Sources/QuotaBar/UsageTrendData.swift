@@ -3,7 +3,8 @@ import Foundation
 /// 趋势图翻页的数据入口。
 ///
 /// - Codex / Kimi Code：直接读本地日志，全历史可查、精确到小时；
-/// - DeepSeek：网页接口口径，快照中只有近 30 天逐日与今日逐小时，更早的窗口缺席。
+/// - DeepSeek：官方 key 走网页接口（近 30 天逐日 + 今日逐小时），
+///   非官方 provider 走 DSH 本地会话日志并回溯一年，更早窗口由本地日志补齐。
 ///
 /// 日志解析量大（数百 MB），所有入口都是 async 且不在主线程执行文件 IO——
 /// 视图层用 .task 加载，绝不能回到在 body 里同步调用（冷扫描会卡死窗口打开）。
@@ -91,7 +92,7 @@ enum UsageTrendData {
         }
     }
 
-    /// 从快照的 30 天逐日序列中切出指定窗口（窗口内未被覆盖的日期补 0；完全不重叠返回 nil）。
+    /// 从快照的逐日序列中切出指定窗口（窗口内未被覆盖的日期补 0；完全不重叠返回 nil）。
     private static func slice(daily: [DailyTokenUsage], days: Int, endingOn endDay: Date) -> [DailyTokenUsage]? {
         let cal = Calendar(identifier: .gregorian)
         let endStart = cal.startOfDay(for: endDay)
