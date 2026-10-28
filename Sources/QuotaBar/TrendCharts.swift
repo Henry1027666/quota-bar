@@ -668,13 +668,28 @@ struct MultiSeriesTrendChart: View {
                 }
             }
             .chartLegend(.hidden)
-            .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
             .chartYScale(domain: 0...yUpperBound)
             .chartForegroundStyleScale(
                 domain: modelSeries.map(\.name),
                 range: modelSeries.map(\.color)
             )
+            .chartXAxis {
+                // 日期轴：标签随宽度自动疏密（近7天每天一个，近30天约每周一个）
+                AxisMarks(values: .automatic) { _ in
+                    AxisValueLabel(format: .dateTime.month(.defaultDigits).day())
+                }
+            }
+            .chartYAxis {
+                // token 轴：紧凑格式（如 1.2亿）+ 浅色网格线，便于对柱高读数
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                    AxisGridLine().foregroundStyle(.secondary.opacity(0.12))
+                    AxisValueLabel {
+                        if let tokens = value.as(Int.self) {
+                            Text(tokens.formatted(.number.notation(.compactName)))
+                        }
+                    }
+                }
+            }
             .chartOverlay { proxy in
                 // plotFrame 是 Anchor<CGRect>，需经 GeometryProxy 解析成实际坐标
                 GeometryReader { overlayGeo in
@@ -837,8 +852,23 @@ struct MultiSeriesHourlyChart: View {
                 }
             }
             .chartLegend(.hidden)
-            .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
+            .chartXAxis {
+                // 小时轴：标签随宽度自动疏密（如 0时 6时 12时 18时）
+                AxisMarks(values: .automatic) { _ in
+                    AxisValueLabel(format: .dateTime.hour())
+                }
+            }
+            .chartYAxis {
+                // token 轴：紧凑格式（如 1.2亿）+ 浅色网格线，与逐日图一致
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                    AxisGridLine().foregroundStyle(.secondary.opacity(0.12))
+                    AxisValueLabel {
+                        if let tokens = value.as(Int.self) {
+                            Text(tokens.formatted(.number.notation(.compactName)))
+                        }
+                    }
+                }
+            }
             .chartYScale(domain: 0...yUpperBound)
             .chartForegroundStyleScale(
                 domain: modelSeries.map(\.name),
