@@ -210,8 +210,8 @@ struct QuotaRow: View {
     }
 }
 
-/// 趋势图翻页器：周期由外部（统计卡片）选择，本组件只留 ‹ 日期范围 › 翻页头 +
-/// 固定高度图表区，切换周期或翻页时窗口不抖动。主窗口总览页使用。
+/// 趋势图翻页器：周期由外部（统计卡片）选择，本组件只负责固定高度图表区，
+/// 切换周期时窗口不抖动。主窗口总览页使用。
 struct TrendChartPager: View {
     let kinds: [ProviderKind]
     /// 取厂商最新快照（UsageTrendData 需要快照里的逐日/逐小时精确数据）。
@@ -222,8 +222,6 @@ struct TrendChartPager: View {
     /// 刷新令牌（store.lastRefreshedAt）：快照更新后重新加载趋势。
     var reloadToken: Date? = nil
 
-    /// 图表翻页偏移：0 为当前周期，每翻一页回退一个周期（日/周/月/年随 period）。
-    @State private var pageOffset = 0
     /// nil = 加载中。趋势数据在后台线程解析（日志文件量大），加载期间显示占位。
     @State private var dailyTrends: [ProviderTrend]?
     @State private var hourlyTrends: [ProviderHourlyTrend]?
@@ -236,34 +234,10 @@ struct TrendChartPager: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                Spacer()
-                Button { pageOffset -= 1 } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                Text(pageRangeTitle)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                Button { pageOffset += 1 } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(pageOffset == 0)
-                .opacity(pageOffset == 0 ? 0.25 : 1)
-            }
-            .onChange(of: period) { _, _ in pageOffset = 0 }
-
             // 图例形状跟图表走：堆叠柱用方块（与堆叠段一致），曲线/点阵用圆点。
-            // 总量不进图例，它在悬停气泡里给出。
-            if !legendEntries.isEmpty {
+            // 总量不进图例，它在悬停气泡里给出；近一年点阵图不显示图例
+            // （格子深浅只表达当日总量，系列明细由悬停气泡给出）。
+            if period != .last365, !legendEntries.isEmpty {
                 HStack(spacing: 12) {
                     ForEach(legendEntries) { entry in
                         HStack(spacing: 4) {
@@ -330,7 +304,7 @@ struct TrendChartPager: View {
             .frame(height: chartHeight)
         }
         .task(id: reloadID) {
-            // 切周期/翻页时先置回加载态，避免旧数据在新口径下闪一帧
+            // 切周期时先置回加载态，避免旧数据在新口径下闪一帧
             dailyTrends = nil
             hourlyTrends = nil
             dailySeries = nil
@@ -339,15 +313,15 @@ struct TrendChartPager: View {
         }
     }
 
-    /// 触发趋势重载的条件组合：周期、页码、厂商范围、快照刷新时间。
+    /// 触发趋势重载的条件组合：周期、厂商范围、快照刷新时间。
     private var reloadID: String {
-        "\(period.title)-\(pageOffset)-\(kinds.map(\.rawValue).joined())-\(reloadToken?.timeIntervalSince1970 ?? 0)"
+        "\(period.title)-\(kinds.map(\.rawValue).joined())-\(reloadToken?.timeIntervalSince1970 ?? 0)"
     }
 
-    /// 后台加载当前页的厂商趋势序列（UsageTrendData 内部已把文件 IO 放到非主线程）。
+    /// 后台加载当前周期的厂商趋势序列（UsageTrendData 内部已把文件 IO 放到非主线程）。
     /// 单厂商作用域额外加载模型维度，组装成「总用量 + 各模型」曲线组。
     private func reload() async {
-        let end = pageEndDay
+        let end = Date()
         if period == .today {
             let now = Date()
             if isSingleProvider, let kind = kinds.first {
@@ -413,28 +387,7 @@ struct TrendChartPager: View {
         return series
     }
 
-    /// 当前页锚定的窗口末日：pageOffset 为 0 时是今天，每翻一页回退一个周期。
-    private var pageEndDay: Date {
-        Calendar.current.date(byAdding: .day, value: pageOffset * period.days, to: Date()) ?? Date()
-    }
-
-    /// 翻页头的日期范围文案：今日显示当天，近7天/近30天显示日期区间，近一年显示年月区间。
-    private var pageRangeTitle: String {
-        let cal = Calendar(identifier: .gregorian)
-        let end = cal.startOfDay(for: pageEndDay)
-        switch period {
-        case .today:
-            return end.formatted(.dateTime.month(.wide).day().weekday(.abbreviated))
-        case .last7, .last30:
-            let start = cal.date(byAdding: .day, value: -(period.days - 1), to: end) ?? end
-            return "\(start.formatted(.dateTime.month(.wide).day())) – \(end.formatted(.dateTime.month(.wide).day()))"
-        case .last365:
-            let start = cal.date(byAdding: .day, value: -(period.days - 1), to: end) ?? end
-            return "\(start.formatted(.dateTime.year().month(.wide))) – \(end.formatted(.dateTime.year().month(.wide)))"
-        }
-    }
-
-    /// 当前页图表是否为柱形图：单厂商的今日/近7天/近30天是堆叠柱，总览的近7天/近30天
+    /// 当前周期图表是否为柱形图：单厂商的今日/近7天/近30天是堆叠柱，总览的近7天/近30天
     /// 也是堆叠柱；近一年是点阵图，总览的今日是多厂商曲线。图例形状跟图表走（柱→方块）。
     private var chartShowsBars: Bool {
         isSingleProvider ? period != .last365
