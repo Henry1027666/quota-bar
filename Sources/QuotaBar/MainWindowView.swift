@@ -95,9 +95,21 @@ struct MainWindowView: View {
         }
         .buttonStyle(.plain)
         .onHover { gearHovered = $0 }
-        .popover(isPresented: $showSettings, arrowEdge: .top) {
-            SettingsView(store: store)
-                .frame(width: 380)
+        .sheet(isPresented: $showSettings) {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("设置")
+                        .font(.headline)
+                    Spacer()
+                    Button("完成") { showSettings = false }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                SettingsView(store: store)
+                    .frame(width: 400)
+            }
+            .padding(.bottom, 8)
         }
     }
 }
